@@ -1,0 +1,2 @@
+lidar_node:
+  ros__parameters: {}

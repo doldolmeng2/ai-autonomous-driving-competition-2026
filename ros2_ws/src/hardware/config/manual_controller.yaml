@@ -1,0 +1,6 @@
+manual_controller_node:
+  ros__parameters:
+    device_path: "/dev/input/js0"
+    publish_rate: 30.0
+    deadzone: 0.05
+    topic_name: "/manual_controller/joy"
