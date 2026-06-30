@@ -25,7 +25,6 @@ setup(
             'lidar_node = hardware.lidar_node:main',
             'ultrasonic_node = hardware.ultrasonic_node:main',
             'manual_controller_node = hardware.manual_controller_node:main',
-            'motor_serial_node = hardware.motor_serial_node:main',
             'camera_viewer_node = hardware.camera_viewer_node:main',
             'lidar_viewer_node = hardware.lidar_viewer_node:main',
             'ultrasonic_viewer_node = hardware.ultrasonic_viewer_node:main',

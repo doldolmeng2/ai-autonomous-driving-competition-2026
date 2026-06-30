@@ -1,0 +1,40 @@
+# ROS2 / colcon
+build/
+install/
+log/
+.colcon/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# ROS bags and logs
+rosbag2_*/
+*.db3
+*.mcap
+*.bag
+*.active
+*.log
+
+# Camera calibration captures and generated OpenCV files
+calibration/**/*.png
+calibration/**/*.jpg
+calibration/**/*.jpeg
+calibration/**/ost.txt
+calibration/**/ost.yaml
+
+# Local editor and OS files
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
