@@ -1,4 +1,5 @@
 import math
+import time
 
 import cv2
 import numpy as np
@@ -15,16 +16,19 @@ class UltrasonicViewerNode(Node):
         self.declare_parameter('sensor_names', ['1', '2', '3', '4', '5', '6'])
         self.declare_parameter('max_range', 4.0)
         self.declare_parameter('window_name', 'ultrasonic_ranges')
+        self.declare_parameter('stale_timeout', 1.0)
 
         self.sensor_names = list(self.get_parameter('sensor_names').value)
         self.max_range = float(self.get_parameter('max_range').value)
         self.window_name = self.get_parameter('window_name').value
+        self.stale_timeout = float(self.get_parameter('stale_timeout').value)
         self.ranges = {name: math.inf for name in self.sensor_names}
+        self.last_update = {name: None for name in self.sensor_names}
 
         for name in self.sensor_names:
             self.create_subscription(
                 Range,
-                f'/ultrasonic/{name}/range',
+                f'/ultrasonic/range_{name}',
                 lambda msg, sensor=name: self.range_callback(sensor, msg),
                 10,
             )
@@ -32,6 +36,7 @@ class UltrasonicViewerNode(Node):
 
     def range_callback(self, name, msg):
         self.ranges[name] = msg.range
+        self.last_update[name] = time.monotonic()
 
     def draw(self):
         width = 700
@@ -53,8 +58,12 @@ class UltrasonicViewerNode(Node):
         for index, name in enumerate(self.sensor_names):
             y = 80 + index * 55
             distance = self.ranges.get(name, math.inf)
+            updated_at = self.last_update.get(name)
+            is_stale = updated_at is not None and time.monotonic() - updated_at > self.stale_timeout
             ratio = 0.0 if not math.isfinite(distance) else min(distance / self.max_range, 1.0)
             color = (0, 80, 255) if ratio < 0.25 else (0, 220, 0)
+            if updated_at is None or is_stale:
+                color = (80, 80, 80)
 
             cv2.putText(
                 image,
@@ -74,7 +83,14 @@ class UltrasonicViewerNode(Node):
                 color,
                 -1,
             )
-            label = 'no data' if not math.isfinite(distance) else f'{distance:.2f} m'
+            if updated_at is None:
+                label = 'no topic'
+            elif is_stale:
+                label = 'stale'
+            elif not math.isfinite(distance):
+                label = 'no echo'
+            else:
+                label = f'{distance:.2f} m'
             cv2.putText(
                 image,
                 label,

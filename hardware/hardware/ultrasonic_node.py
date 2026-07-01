@@ -1,5 +1,6 @@
 import math
 import time
+from glob import glob
 
 import rclpy
 from rclpy.node import Node
@@ -16,6 +17,8 @@ class UltrasonicNode(Node):
         super().__init__('ultrasonic_node')
         self.declare_parameter('port', '/dev/ttyACM0')
         self.declare_parameter('baudrate', 115200)
+        self.declare_parameter('arduino_boot_delay', 2.0)
+        self.declare_parameter('debug_log_raw_line', False)
         self.declare_parameter('sensor_names', ['1', '2', '3', '4', '5', '6'])
         self.declare_parameter('frame_prefix', 'ultrasonic_')
         self.declare_parameter('field_of_view', 0.26)
@@ -25,6 +28,10 @@ class UltrasonicNode(Node):
 
         self.port = self.get_parameter('port').value
         self.baudrate = int(self.get_parameter('baudrate').value)
+        self.arduino_boot_delay = float(
+            self.get_parameter('arduino_boot_delay').value
+        )
+        self.debug_log_raw_line = bool(self.get_parameter('debug_log_raw_line').value)
         self.sensor_names = list(self.get_parameter('sensor_names').value)
         self.frame_prefix = self.get_parameter('frame_prefix').value
         self.field_of_view = float(self.get_parameter('field_of_view').value)
@@ -33,7 +40,7 @@ class UltrasonicNode(Node):
         self.publish_timeout = float(self.get_parameter('publish_timeout').value)
 
         self.range_publishers = {
-            name: self.create_publisher(Range, f'/ultrasonic/{name}/range', 10)
+            name: self.create_publisher(Range, f'/ultrasonic/range_{name}', 10)
             for name in self.sensor_names
         }
         self.array_publisher = self.create_publisher(
@@ -42,8 +49,10 @@ class UltrasonicNode(Node):
             10,
         )
         self.serial = None
+        self.active_port = ''
         self.last_open_attempt = 0.0
         self.last_publish = 0.0
+        self.last_debug_log = 0.0
         self.timer = self.create_timer(0.01, self.poll)
 
     def destroy_node(self):
@@ -67,6 +76,7 @@ class UltrasonicNode(Node):
         if not line:
             return
 
+        self.log_raw_line(line)
         values = self.parse_line(line)
         if values:
             self.publish(values)
@@ -77,17 +87,49 @@ class UltrasonicNode(Node):
             return False
         self.last_open_attempt = now
 
-        try:
-            self.serial = open_serial(self.port, self.baudrate, timeout=0.02)
-            self.get_logger().info(f'Ultrasonic serial connected on {self.port}')
-            return True
-        except Exception as exc:
+        candidates = self.serial_candidates()
+        if not candidates:
             self.get_logger().warn(
-                f'Waiting for ultrasonic serial device {self.port}: {exc}',
+                'Waiting for ultrasonic serial device',
                 throttle_duration_sec=5.0,
             )
-            self.close()
             return False
+
+        last_error = None
+        for port in candidates:
+            try:
+                self.serial = open_serial(port, self.baudrate, timeout=0.02)
+                self.active_port = port
+                self.get_logger().info(f'Ultrasonic serial connected on {port}')
+                self.wait_for_arduino_boot()
+                return True
+            except Exception as exc:
+                last_error = exc
+                self.close()
+
+        self.get_logger().warn(
+            f'Waiting for ultrasonic serial device {self.port}: {last_error}',
+            throttle_duration_sec=5.0,
+        )
+        return False
+
+    def serial_candidates(self):
+        if self.port != 'auto':
+            return [self.port]
+        return sorted(glob('/dev/ttyACM*'))
+
+    def wait_for_arduino_boot(self):
+        if self.arduino_boot_delay > 0.0:
+            time.sleep(self.arduino_boot_delay)
+
+        try:
+            if hasattr(self.serial, 'reset_input_buffer'):
+                self.serial.reset_input_buffer()
+        except Exception as exc:
+            self.get_logger().warn(
+                f'Ultrasonic serial buffer reset failed: {exc}',
+                throttle_duration_sec=5.0,
+            )
 
     def close(self):
         if self.serial is not None:
@@ -95,6 +137,17 @@ class UltrasonicNode(Node):
                 self.serial.close()
             finally:
                 self.serial = None
+                self.active_port = ''
+
+    def log_raw_line(self, line):
+        if not self.debug_log_raw_line:
+            return
+
+        now = time.monotonic()
+        if now - self.last_debug_log < 1.0:
+            return
+        self.last_debug_log = now
+        self.get_logger().info(f'Ultrasonic raw: {line}')
 
     def parse_line(self, line):
         try:

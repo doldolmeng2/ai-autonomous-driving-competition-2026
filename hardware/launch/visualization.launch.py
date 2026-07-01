@@ -36,6 +36,12 @@ def generate_launch_description():
         Node(package='hardware', executable='lidar_viewer_node', output='screen'),
         Node(
             package='hardware',
+            executable='ultrasonic_node',
+            output='screen',
+            parameters=[str(share / 'config' / 'ultrasonic.yaml')],
+        ),
+        Node(
+            package='hardware',
             executable='ultrasonic_viewer_node',
             output='screen',
             parameters=[str(share / 'config' / 'ultrasonic.yaml')],

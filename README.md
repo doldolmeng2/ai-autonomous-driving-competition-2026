@@ -68,12 +68,12 @@ ros2 launch sllidar_ros2 sllidar_a1_launch.py
 /camera/right/image_raw
 /camera/right/camera_info
 /scan
-/ultrasonic/1/range
-/ultrasonic/2/range
-/ultrasonic/3/range
-/ultrasonic/4/range
-/ultrasonic/5/range
-/ultrasonic/6/range
+/ultrasonic/range_1
+/ultrasonic/range_2
+/ultrasonic/range_3
+/ultrasonic/range_4
+/ultrasonic/range_5
+/ultrasonic/range_6
 /ultrasonic/ranges
 ```
 

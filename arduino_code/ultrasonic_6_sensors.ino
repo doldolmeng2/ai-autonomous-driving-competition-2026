@@ -11,26 +11,32 @@
     meter
 
   예:
-    0.153,0.842,inf,1.204,0.331,2.018
+    센서 6개: 0.153,0.842,nan,1.204,0.331,2.018
+    센서 5개: 0.153,0.842,nan,1.204,0.331
 
   토픽 매핑:
-    값 1 -> /ultrasonic/1/range
-    값 2 -> /ultrasonic/2/range
-    값 3 -> /ultrasonic/3/range
-    값 4 -> /ultrasonic/4/range
-    값 5 -> /ultrasonic/5/range
-    값 6 -> /ultrasonic/6/range
+    값 1 -> /ultrasonic/range_1
+    값 2 -> /ultrasonic/range_2
+    값 3 -> /ultrasonic/range_3
+    값 4 -> /ultrasonic/range_4
+    값 5 -> /ultrasonic/range_5
+    값 6 -> /ultrasonic/range_6
 
   주의:
     Serial에는 CSV 거리값만 출력한다.
     디버그 문장을 출력하면 ROS 노드가 파싱하지 못할 수 있다.
 */
 
-const int SENSOR_COUNT = 6;
+const int ACTIVE_SENSOR_COUNT = 1;  // 센서 5개만 쓸 때는 5로 변경
 
-// Arduino Mega 기준 기본 핀. 실제 배선에 맞게 여기만 수정하면 됨.
-const int TRIG_PINS[SENSOR_COUNT] = {22, 24, 26, 28, 30, 32};
-const int ECHO_PINS[SENSOR_COUNT] = {23, 25, 27, 29, 31, 33};
+// Arduino Mega 기준 기본 핀. 앞에서부터 ACTIVE_SENSOR_COUNT개만 사용함.
+// const int TRIG_PINS[] = {22, 24, 26, 28, 30, 32};
+// const int ECHO_PINS[] = {23, 25, 27, 29, 31, 33};
+const int TRIG_PINS[] = {22};
+const int ECHO_PINS[] = {23};
+
+const int CONFIGURED_SENSOR_COUNT = sizeof(TRIG_PINS) / sizeof(TRIG_PINS[0]);
+const int SENSOR_COUNT = min(ACTIVE_SENSOR_COUNT, CONFIGURED_SENSOR_COUNT);
 
 const unsigned long BAUDRATE = 115200;
 
