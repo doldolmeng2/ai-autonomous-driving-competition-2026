@@ -52,6 +52,14 @@ launch 파일을 수정했거나 새로 옮겼으면 다시 빌드 후 `source i
 ros2 launch hardware sensors.launch.py
 ```
 
+라이다만 단독 실행:
+
+```bash
+ros2 launch sllidar_ros2 sllidar_a1_launch.py
+```
+
+`hardware`의 센서 관련 launch는 내부에서 위 Slamtec A1 launch를 불러와 `/scan`을 발행한다.
+
 발행 토픽:
 
 ```text
@@ -91,11 +99,11 @@ drive_control/drive_control_node -> /manual_controller/joy 구독 후 Arduino se
 ros2 launch drive_control controller_drive.launch.py serial_port:=/dev/ttyACM0
 ```
 
-아두이노에는 `steer drive` 형식의 두 정수를 9600 baud로 보낸다. 현재 안전값은 다음과 같다.
+아두이노에는 `steer drive` 형식의 두 정수를 115200 baud로 보낸다. 현재 안전값은 다음과 같다.
 
 ```text
-속도: -20 ~ 20 PWM
-조향: -20 또는 20 PWM을 1초만 송신, 이후 0
+속도: -30 ~ 30 PWM
+조향: -40 또는 40 PWM을 1초만 송신, 이후 0
 ```
 
 센서 발행과 rosbag 기록:

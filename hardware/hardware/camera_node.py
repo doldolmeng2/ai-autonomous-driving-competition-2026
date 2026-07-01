@@ -56,6 +56,9 @@ class CameraPublisher:
         self.height = int(node.get_parameter('height').value)
         self.fps = float(node.get_parameter('fps').value)
         self.pixel_format = node.get_parameter('pixel_format').value
+        self.required_name_substring = node.get_parameter(
+            'required_name_substring'
+        ).value
 
         qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -86,6 +89,13 @@ class CameraPublisher:
         if now - self.last_open_attempt < 1.0:
             return False
         self.last_open_attempt = now
+
+        if not self.node.device_name_matches(self.device, self.required_name_substring):
+            self.node.get_logger().warn(
+                f'[{self.side}] waiting for C920 camera on {self.device}',
+                throttle_duration_sec=5.0,
+            )
+            return False
 
         cap = cv2.VideoCapture(self.device, cv2.CAP_V4L2)
         if not cap.isOpened():
@@ -175,6 +185,7 @@ class CameraNode(Node):
         self.declare_parameter('fps', 30.0)
         self.declare_parameter('pixel_format', 'YUYV')
         self.declare_parameter('auto_fallback_devices', True)
+        self.declare_parameter('required_name_substring', 'C920')
 
         for side, device in (('left', '/dev/video4'), ('right', '/dev/video6')):
             self.declare_parameter(f'{side}.device', device)
@@ -195,17 +206,17 @@ class CameraNode(Node):
             preferred = self.get_parameter(f'{side}.device').value
             device = self.resolve_device(side, preferred, used_devices)
             if device:
-                used_devices.add(device)
+                used_devices.add(self.device_key(device))
             self.camera_publishers.append(CameraPublisher(self, side, device))
 
     def resolve_device(self, side, preferred, used_devices):
-        if Path(preferred).exists():
+        if preferred != 'auto' and self.is_capture_device(preferred):
             return preferred
         if not bool(self.get_parameter('auto_fallback_devices').value):
             return preferred
 
-        for device in sorted(glob('/dev/video*')):
-            if device in used_devices:
+        for device in self.camera_candidates():
+            if self.device_key(device) in used_devices:
                 continue
             if self.is_capture_device(device):
                 self.get_logger().warn(
@@ -215,7 +226,27 @@ class CameraNode(Node):
 
         return preferred
 
+    def camera_candidates(self):
+        candidates = []
+        candidates.extend(sorted(glob('/dev/v4l/by-path/*')))
+        candidates.extend(sorted(glob('/dev/v4l/by-id/*')))
+        candidates.extend(sorted(glob('/dev/video*')))
+
+        unique = []
+        seen = set()
+        for device in candidates:
+            key = self.device_key(device)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(device)
+        return unique
+
     def is_capture_device(self, device):
+        required = self.get_parameter('required_name_substring').value
+        if not self.device_name_matches(device, required):
+            return False
+
         cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
         try:
             if not cap.isOpened():
@@ -225,6 +256,29 @@ class CameraNode(Node):
             return width > 0 and height > 0
         finally:
             cap.release()
+
+    def device_name_matches(self, device, required):
+        if not required:
+            return True
+
+        device_path = Path(device)
+        if not device_path.exists():
+            return False
+
+        try:
+            video_name = device_path.resolve().name
+            name_path = Path('/sys/class/video4linux') / video_name / 'name'
+            device_name = name_path.read_text().strip()
+        except OSError:
+            return False
+
+        return required.lower() in device_name.lower()
+
+    def device_key(self, device):
+        try:
+            return str(Path(device).resolve())
+        except OSError:
+            return str(device)
 
     def destroy_node(self):
         for publisher in getattr(self, 'camera_publishers', []):

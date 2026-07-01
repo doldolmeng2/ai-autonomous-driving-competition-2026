@@ -5,6 +5,7 @@ camera_node:
     fps: 30.0
     pixel_format: "YUYV"
     auto_fallback_devices: true
+    required_name_substring: "C920"
     left:
       device: "/dev/video4"
       frame_id: "camera_left"
@@ -12,7 +13,7 @@ camera_node:
       camera_info_topic: "/camera/left/camera_info"
       camera_info: "~/.ros/camera_info/c920_left.yaml"
     right:
-      device: "/dev/video6"
+      device: "auto"
       frame_id: "camera_right"
       image_topic: "/camera/right/image_raw"
       camera_info_topic: "/camera/right/camera_info"

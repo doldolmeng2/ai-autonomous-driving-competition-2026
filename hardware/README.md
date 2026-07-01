@@ -5,7 +5,7 @@
 | Node | Subscribe | Publish |
 | --- | --- | --- |
 | `camera_node` | - | `/camera/left/image_raw` `sensor_msgs/Image`, `/camera/left/camera_info` `sensor_msgs/CameraInfo`, `/camera/right/image_raw` `sensor_msgs/Image`, `/camera/right/camera_info` `sensor_msgs/CameraInfo` |
-| `lidar_node` | - | `/scan` `sensor_msgs/LaserScan` |
+| `sllidar_node` | - | `/scan` `sensor_msgs/LaserScan` |
 | `ultrasonic_node` | - | `/ultrasonic/front/range` `sensor_msgs/Range`, `/ultrasonic/left/range` `sensor_msgs/Range`, `/ultrasonic/right/range` `sensor_msgs/Range`, `/ultrasonic/ranges` `std_msgs/Float32MultiArray` |
 | `manual_controller_node` | - | `/manual_controller/joy` `sensor_msgs/Joy` |
 | `camera_viewer_node` | `/camera/left/image_raw` `sensor_msgs/Image`, `/camera/right/image_raw` `sensor_msgs/Image` | OpenCV windows |
@@ -31,8 +31,11 @@ Current tested camera mapping:
 
 ```text
 /dev/video4 -> C920 left camera
-/dev/video0 -> fallback right camera when /dev/video6 is not connected
+/dev/video6 -> C920 right camera
 ```
+
+`camera_node` requires the video device name to contain `C920`; it does not fall
+back to non-C920 webcams.
 
 Current tested controller mapping:
 
@@ -47,11 +50,13 @@ grant serial access once and log out/in:
 sudo usermod -aG dialout $USER
 ```
 
-Before logging out/in, this session can test lidar with:
+Run the Slamtec A1 lidar directly with:
 
 ```bash
-sg dialout -c "ros2 run hardware lidar_node --ros-args --params-file install/hardware/share/hardware/config/lidar.yaml"
+ros2 launch sllidar_ros2 sllidar_a1_launch.py
 ```
+
+The `hardware` sensor launch files include that same Slamtec launch.
 
 For a temporary test without logging out, run:
 
