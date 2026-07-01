@@ -12,7 +12,7 @@ class UltrasonicViewerNode(Node):
 
     def __init__(self):
         super().__init__('ultrasonic_viewer_node')
-        self.declare_parameter('sensor_names', ['front', 'left', 'right'])
+        self.declare_parameter('sensor_names', ['1', '2', '3', '4', '5', '6'])
         self.declare_parameter('max_range', 4.0)
         self.declare_parameter('window_name', 'ultrasonic_ranges')
 
@@ -34,8 +34,8 @@ class UltrasonicViewerNode(Node):
         self.ranges[name] = msg.range
 
     def draw(self):
-        width = 640
-        height = 260
+        width = 700
+        height = 430
         image = np.zeros((height, width, 3), dtype=np.uint8)
         cv2.putText(
             image,

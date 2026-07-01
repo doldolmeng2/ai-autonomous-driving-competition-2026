@@ -16,7 +16,7 @@ class UltrasonicNode(Node):
         super().__init__('ultrasonic_node')
         self.declare_parameter('port', '/dev/ttyACM0')
         self.declare_parameter('baudrate', 115200)
-        self.declare_parameter('sensor_names', ['front', 'left', 'right'])
+        self.declare_parameter('sensor_names', ['1', '2', '3', '4', '5', '6'])
         self.declare_parameter('frame_prefix', 'ultrasonic_')
         self.declare_parameter('field_of_view', 0.26)
         self.declare_parameter('min_range', 0.02)

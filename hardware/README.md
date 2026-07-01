@@ -6,7 +6,7 @@
 | --- | --- | --- |
 | `camera_node` | - | `/camera/left/image_raw` `sensor_msgs/Image`, `/camera/left/camera_info` `sensor_msgs/CameraInfo`, `/camera/right/image_raw` `sensor_msgs/Image`, `/camera/right/camera_info` `sensor_msgs/CameraInfo` |
 | `sllidar_node` | - | `/scan` `sensor_msgs/LaserScan` |
-| `ultrasonic_node` | - | `/ultrasonic/front/range` `sensor_msgs/Range`, `/ultrasonic/left/range` `sensor_msgs/Range`, `/ultrasonic/right/range` `sensor_msgs/Range`, `/ultrasonic/ranges` `std_msgs/Float32MultiArray` |
+| `ultrasonic_node` | - | `/ultrasonic/1/range` ... `/ultrasonic/6/range` `sensor_msgs/Range`, `/ultrasonic/ranges` `std_msgs/Float32MultiArray` |
 | `manual_controller_node` | - | `/manual_controller/joy` `sensor_msgs/Joy` |
 | `camera_viewer_node` | `/camera/left/image_raw` `sensor_msgs/Image`, `/camera/right/image_raw` `sensor_msgs/Image` | OpenCV windows |
 | `lidar_viewer_node` | `/scan` `sensor_msgs/LaserScan` | OpenCV radar window |

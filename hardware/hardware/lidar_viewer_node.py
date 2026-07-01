@@ -55,8 +55,7 @@ class LidarViewerNode(Node):
                 cv2.LINE_AA,
             )
 
-        cv2.line(image, (center, 20), (center, size - 20), (0, 70, 0), 1)
-        cv2.line(image, (20, center), (size - 20, center), (0, 70, 0), 1)
+        self.draw_bearing_guides(image, center, size)
         cv2.circle(image, (center, center), 7, (0, 255, 0), -1)
         cv2.putText(
             image,
@@ -83,8 +82,81 @@ class LidarViewerNode(Node):
                 cv2.LINE_AA,
             )
 
+        cv2.putText(
+            image,
+            '0 deg = FRONT, angle increases counter-clockwise',
+            (25, size - 25),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 220, 220),
+            1,
+            cv2.LINE_AA,
+        )
+
         cv2.imshow(self.window_name, image)
         cv2.waitKey(1)
+
+    def draw_bearing_guides(self, image, center, size):
+        guide_color = (0, 90, 0)
+        label_color = (0, 220, 220)
+        radius = int(size * 0.45)
+
+        # 0 deg is vehicle front. Positive angles rotate counter-clockwise.
+        bearings = [
+            (0, '0 deg FRONT', (center + 12, center - radius + 24)),
+            (90, '+90 deg LEFT', (center - radius + 18, center - 14)),
+            (-90, '-90 deg RIGHT', (center + radius - 155, center - 14)),
+            (180, '+/-180 deg REAR', (center - 95, center + radius - 12)),
+        ]
+
+        cv2.line(image, (center, 20), (center, size - 20), guide_color, 1)
+        cv2.line(image, (20, center), (size - 20, center), guide_color, 1)
+        cv2.arrowedLine(
+            image,
+            (center, center),
+            (center, 35),
+            label_color,
+            2,
+            tipLength=0.08,
+        )
+
+        for angle_deg, label, label_pos in bearings:
+            angle = math.radians(angle_deg)
+            x = int(center - math.sin(angle) * radius)
+            y = int(center - math.cos(angle) * radius)
+            cv2.circle(image, (x, y), 5, label_color, -1)
+            cv2.putText(
+                image,
+                label,
+                label_pos,
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                label_color,
+                1,
+                cv2.LINE_AA,
+            )
+
+        cv2.ellipse(
+            image,
+            (center, center),
+            (70, 70),
+            0,
+            250,
+            110,
+            label_color,
+            1,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            image,
+            'CCW +',
+            (center - 95, center - 82),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            label_color,
+            1,
+            cv2.LINE_AA,
+        )
 
     def draw_scan(self, image, center, scale):
         msg = self.latest_scan
@@ -95,7 +167,8 @@ class LidarViewerNode(Node):
                 continue
 
             angle = msg.angle_min + index * msg.angle_increment
-            x = int(center + math.sin(angle) * distance * scale)
+            angle = math.atan2(math.sin(angle), math.cos(angle))
+            x = int(center - math.sin(angle) * distance * scale)
             y = int(center - math.cos(angle) * distance * scale)
             intensity = 120
             if index < len(msg.intensities):
