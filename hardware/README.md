@@ -19,6 +19,12 @@ USB controller -> manual_controller_node -> /manual_controller/joy
 -> drive_control node -> Arduino -> motor driver
 ```
 
+Manual driving launch is owned by the `drive_control` package:
+
+```bash
+ros2 launch drive_control controller_drive.launch.py
+```
+
 ## Device notes
 
 Current tested camera mapping:

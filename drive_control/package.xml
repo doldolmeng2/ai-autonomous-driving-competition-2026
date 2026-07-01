@@ -3,11 +3,14 @@
 <package format="3">
   <name>drive_control</name>
   <version>0.0.0</version>
-  <description>Drive control placeholder.</description>
+  <description>Manual controller to Arduino drive control bridge.</description>
   <maintainer email="hailab@example.com">hailab</maintainer>
   <license>TODO: License declaration</license>
 
   <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+  <exec_depend>hardware</exec_depend>
+  <exec_depend>python3-serial</exec_depend>
 
   <export>
     <build_type>ament_python</build_type>
