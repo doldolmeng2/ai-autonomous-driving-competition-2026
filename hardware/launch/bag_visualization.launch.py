@@ -6,8 +6,7 @@ from launch.actions import ExecuteProcess, LogInfo
 from launch_ros.actions import Node
 
 
-BAG_PATH = '/home/hailab/osy/260630/ai-autonomous-driving-competition-2026/rosbag2_2026_07_01-13_36_34'
-
+BAG_PATH = '/home/hailab/osy/260630/ai-autonomous-driving-competition-2026/rosbag2_2026_07_01-15_59_26'
 
 def generate_launch_description():
     share = Path(get_package_share_directory('hardware'))

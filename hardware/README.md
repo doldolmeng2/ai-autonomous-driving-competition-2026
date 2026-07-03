@@ -41,6 +41,8 @@ Current tested controller mapping:
 
 ```text
 /dev/input/js0 -> Xbox 360 Wireless Receiver
+left stick vertical axis 1 -> drive forward/reverse
+right stick horizontal axis 3 -> steering
 ```
 
 RPLidar A1 is expected on `/dev/ttyUSB0`. If it shows `Permission denied`,

@@ -19,6 +19,7 @@ env/
 
 # ROS bags and logs
 rosbag2_*/
+rosbag2_*
 *.db3
 *.mcap
 *.bag

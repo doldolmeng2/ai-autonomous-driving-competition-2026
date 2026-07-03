@@ -15,11 +15,12 @@ class DriveControlNode(Node):
         self.declare_parameter('serial_port', 'auto')
         self.declare_parameter('baudrate', 115200)
         self.declare_parameter('command_rate', 20.0)
+        self.declare_parameter('command_resend_interval', 0.1)
         self.declare_parameter('joy_timeout', 0.5)
         self.declare_parameter('arduino_boot_delay', 2.0)
         self.declare_parameter('enable_arduino_debug_log', True)
         self.declare_parameter('enable_tx_debug_log', False)
-        self.declare_parameter('steer_axis', 0)
+        self.declare_parameter('steer_axis', 3)
         self.declare_parameter('drive_axis', 1)
         self.declare_parameter('invert_steer_axis', False)
         self.declare_parameter('invert_drive_axis', True)
@@ -32,6 +33,9 @@ class DriveControlNode(Node):
         self.serial_port_param = self.get_parameter('serial_port').value
         self.baudrate = int(self.get_parameter('baudrate').value)
         command_rate = float(self.get_parameter('command_rate').value)
+        self.command_resend_interval = float(
+            self.get_parameter('command_resend_interval').value
+        )
         self.joy_timeout = float(self.get_parameter('joy_timeout').value)
         self.arduino_boot_delay = float(
             self.get_parameter('arduino_boot_delay').value
@@ -58,6 +62,7 @@ class DriveControlNode(Node):
         self.last_serial_attempt_time = 0.0
         self.last_error_log_time = 0.0
         self.last_command = None
+        self.last_command_sent_time = 0.0
         self.last_joy_time = None
         self.drive_pwm = 0
         self.requested_steer_direction = 0
@@ -72,6 +77,7 @@ class DriveControlNode(Node):
             f'Subscribing {self.joy_topic}, sending Arduino commands at '
             f'{self.baudrate} baud with drive <= {self.max_drive_pwm}, '
             f'steer pulse {self.steer_pwm} for {self.steer_pulse_duration:.1f}s, '
+            f'resend interval {self.command_resend_interval:.2f}s, '
             f'Arduino debug log: {self.enable_arduino_debug_log}, '
             f'TX debug log: {self.enable_tx_debug_log}'
         )
@@ -183,6 +189,7 @@ class DriveControlNode(Node):
 
             self.active_serial_port = port
             self.last_command = None
+            self.last_command_sent_time = 0.0
             self.get_logger().info(f'Arduino serial connected on {port}')
             self.wait_for_arduino_boot()
             self.write_command(0, 0)
@@ -199,10 +206,16 @@ class DriveControlNode(Node):
         return sorted(glob.glob('/dev/ttyACM*')) + sorted(glob.glob('/dev/ttyUSB*'))
 
     def write_command(self, steer_pwm, drive_pwm):
+        import time
+
         steer_pwm = self.clamp_signed_pwm(steer_pwm)
         drive_pwm = self.clamp_signed_pwm(drive_pwm)
         command = (steer_pwm, drive_pwm)
-        if command == self.last_command:
+        now = time.monotonic()
+        if (
+            command == self.last_command
+            and now - self.last_command_sent_time < self.command_resend_interval
+        ):
             return
 
         line = f'{steer_pwm} {drive_pwm}\n'.encode()
@@ -217,6 +230,7 @@ class DriveControlNode(Node):
             return
 
         self.last_command = command
+        self.last_command_sent_time = now
         if self.enable_tx_debug_log:
             self.get_logger().info(f'TX Arduino: {steer_pwm} {drive_pwm}')
 
@@ -261,6 +275,7 @@ class DriveControlNode(Node):
             self.serial = None
             self.active_serial_port = ''
             self.last_command = None
+            self.last_command_sent_time = 0.0
 
     def destroy_node(self):
         if self.serial is not None:
