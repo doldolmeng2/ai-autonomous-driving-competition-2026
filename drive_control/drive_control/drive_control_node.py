@@ -8,9 +8,10 @@
 입력 토픽:
     /motor_control  (std_msgs/msg/Int16MultiArray)
         data = [steer, speed]
-        - steer : 조향 명령. 부호(+/-)로 방향을 결정한다.
-                  steer > 0 : 오른쪽,  steer < 0 : 왼쪽,  steer == 0(데드밴드 이내) : 조향 없음
-        - speed : 구동 모터 PWM (부호 = 전/후진, 크기 = 세기)
+        - steer : 목표 조향각(deg). 노드에서 -steer_max_angle_deg~
+                  +steer_max_angle_deg 범위로 제한한다.
+        - speed : 구동 모터 PWM (부호 = 전/후진, 크기 = 세기).
+                  노드에서 -max_drive_pwm~+max_drive_pwm 범위로 제한한다.
 
     조이스틱(수동)과 자율주행 알고리즘(lane_main / parking 등)이
     "동일한" /motor_control 토픽으로 발행하면, 이 노드는 발행 주체와 무관하게
@@ -18,13 +19,12 @@
 
 출력(아두이노 시리얼):
     "steer speed\n"  (공백 구분, 부호 있는 정수 PWM)
-    예) "-150 30\n"
+    예) "-30 30\n"
 
-조향 처리(기존에 검증된 방식 그대로):
-    조향 모터는 위치 센서가 없어서, "방향이 새로 바뀔 때마다 일정 PWM으로
-    일정 시간(steer_pulse_duration) 펄스를 준다"는 방식으로 조향한다.
-    같은 방향을 계속 유지해도 펄스는 한 번만 나가고(=재펄스 없음),
-    방향이 0(중앙 명령)이 되면 즉시 조향 PWM을 멈춘다.
+조향 처리:
+    조향 모터는 위치 센서가 없어서, 조향 모터를 돌린 시간을 누적해 현재 위치를
+    각도 단위로 추정한다. steer 값을 목표 각도로 사용하고, 현재 추정
+    각도가 목표에 도달할 때까지 고정 PWM(steer_pwm)으로 조향한다.
 """
 
 import rclpy
@@ -48,15 +48,16 @@ class DriveControlNode(Node):
         self.declare_parameter('command_rate', 20.0)        # 아두이노로 명령 보내는 주기(Hz)
         self.declare_parameter('command_resend_interval', 0.1)  # 같은 명령 재전송 간격(s)
         self.declare_parameter('input_timeout', 0.5)        # 이 시간 동안 입력 없으면 정지(s)
-        self.declare_parameter('arduino_boot_delay', 2.0)   # 시리얼 연결 후 아두이노 부팅 대기(s)
+        self.declare_parameter('arduino_boot_delay', 4.0)   # 시리얼 연결 후 아두이노 부팅 대기(s)
         self.declare_parameter('enable_arduino_debug_log', True)  # 아두이노 -> PC 로그 출력
         self.declare_parameter('enable_tx_debug_log', False)      # PC -> 아두이노 송신 로그 출력
 
         # 구동 / 조향 제어값 관련
-        self.declare_parameter('max_drive_pwm', 30)         # 구동 모터 안전 상한 PWM
-        self.declare_parameter('steer_pwm', 40)             # 조향할 때 넣는 PWM 크기
-        self.declare_parameter('steer_deadband', 0)         # steer 값이 이 이하면 조향 없음
-        self.declare_parameter('steer_pulse_duration', 1.0)  # 방향 전환 시 조향 펄스 시간(s)
+        self.declare_parameter('max_drive_pwm', 130)        # 구동 모터 안전 상한 PWM
+        self.declare_parameter('steer_pwm', 150)             # 조향할 때 넣는 PWM 크기
+        self.declare_parameter('steer_max_angle_deg', 45.0)  # 최대 좌/우 조향각(deg)
+        self.declare_parameter('steer_center_time', 0.45)    # 최대 꺾임에서 중앙까지 걸리는 시간(s)
+        self.declare_parameter('steer_angle_tolerance_deg', 1.0)  # 목표 도달 판정 여유(deg)
 
         # ---- 파라미터 읽기 -------------------------------------------------
         self.motor_control_topic = self.get_parameter('motor_control_topic').value
@@ -74,10 +75,16 @@ class DriveControlNode(Node):
         self.enable_tx_debug_log = bool(self.get_parameter('enable_tx_debug_log').value)
         self.max_drive_pwm = self.clamp_pwm(int(self.get_parameter('max_drive_pwm').value))
         self.steer_pwm = self.clamp_pwm(int(self.get_parameter('steer_pwm').value))
-        self.steer_deadband = abs(int(self.get_parameter('steer_deadband').value))
-        self.steer_pulse_duration = float(
-            self.get_parameter('steer_pulse_duration').value
+        self.steer_max_angle_deg = max(
+            1.0, abs(float(self.get_parameter('steer_max_angle_deg').value))
         )
+        self.steer_center_time = max(
+            0.01, float(self.get_parameter('steer_center_time').value)
+        )
+        self.steer_angle_tolerance_deg = max(
+            0.0, float(self.get_parameter('steer_angle_tolerance_deg').value)
+        )
+        self.steer_speed_deg_per_sec = self.steer_max_angle_deg / self.steer_center_time
 
         # ---- 내부 상태 -----------------------------------------------------
         # 시리얼 연결 상태
@@ -92,10 +99,12 @@ class DriveControlNode(Node):
         self.last_input_time = None         # 마지막 /motor_control 수신 시각
         self.drive_pwm = 0                  # 목표 구동 PWM (speed에서 계산)
 
-        # 조향 펄스 상태(방향이 새로 바뀔 때만 일정 시간 펄스)
-        self.requested_steer_direction = 0  # 마지막으로 요청된 방향(+1/-1/0)
-        self.active_steer_direction = 0     # 현재 펄스 중인 방향
-        self.steer_pulse_until = None       # 펄스 종료 시각(ns)
+        # 조향 각도 추정 상태.
+        # +steer_max_angle_deg=오른쪽 한계, -steer_max_angle_deg=왼쪽 한계, 0=중앙이다.
+        self.target_steer_angle_deg = 0.0
+        self.active_steer_direction = 0     # 직전 주기에 실제로 출력한 방향(+1/-1/0)
+        self.steer_angle_deg = 0.0
+        self.last_steer_update_time = None
 
         # ---- 통신 설정 -----------------------------------------------------
         # 조이스틱/알고리즘이 공통으로 쓰는 /motor_control 구독
@@ -109,8 +118,9 @@ class DriveControlNode(Node):
         self.get_logger().info(
             f'Subscribing {self.motor_control_topic} (Int16MultiArray [steer, speed]), '
             f'sending Arduino commands at {self.baudrate} baud, '
-            f'drive <= {self.max_drive_pwm}, steer pulse {self.steer_pwm} '
-            f'for {self.steer_pulse_duration:.1f}s'
+            f'drive <= {self.max_drive_pwm}, steer {self.steer_pwm}, '
+            f'steer angle +/-{self.steer_max_angle_deg:.1f}deg, '
+            f'center_time {self.steer_center_time:.2f}s'
         )
 
     # ======================================================================
@@ -124,34 +134,15 @@ class DriveControlNode(Node):
         steer = int(msg.data[0]) if len(msg.data) > 0 else 0
         speed = int(msg.data[1]) if len(msg.data) > 1 else 0
 
-        # 구동: speed를 안전 상한으로 clamp 한 PWM
-        self.drive_pwm = max(-self.max_drive_pwm, min(self.max_drive_pwm, speed))
+        # 구동: speed를 안전 상한으로 제한한다.
+        self.drive_pwm = self.clamp_drive_pwm(speed)
 
-        # 조향: 부호로 방향 결정 후, 방향이 바뀌었을 때만 펄스 시작
-        self.update_steer_request(self.steer_direction(steer))
+        # 조향: steer를 목표 각도(deg)로 사용한다. 안전을 위해 +/- 최대각으로 제한한다.
+        self.target_steer_angle_deg = self.steer_to_target_angle(steer)
 
-    def steer_direction(self, steer):
-        """steer 값 -> 방향(+1 오른쪽 / -1 왼쪽 / 0 없음). 데드밴드 이내면 0."""
-        if abs(steer) <= self.steer_deadband:
-            return 0
-        return 1 if steer > 0 else -1
-
-    def update_steer_request(self, direction):
-        """방향이 새로 바뀔 때만 steer_pulse_duration 동안의 조향 펄스를 시작."""
-        now = self.get_clock().now()
-        if direction == 0:
-            # 중앙(조향 없음) 명령: 진행 중이던 펄스도 즉시 종료
-            self.requested_steer_direction = 0
-            self.active_steer_direction = 0
-            self.steer_pulse_until = None
-            return
-
-        if direction != self.requested_steer_direction:
-            self.requested_steer_direction = direction
-            self.active_steer_direction = direction
-            self.steer_pulse_until = now.nanoseconds + int(
-                self.steer_pulse_duration * 1_000_000_000
-            )
+    def steer_to_target_angle(self, steer):
+        """steer 입력값(deg)을 안전 범위 안의 목표 조향각(deg)으로 제한한다."""
+        return self.clamp_steer_angle(steer)
 
     # ======================================================================
     # 주기 처리 (아두이노로 실제 전송)
@@ -161,6 +152,8 @@ class DriveControlNode(Node):
         if self.serial is None and not self.open_serial():
             return
 
+        now = self.get_clock().now()
+        self.update_steer_position(now)
         steer_pwm = self.current_steer_pwm()
         drive_pwm = self.drive_pwm
 
@@ -168,26 +161,43 @@ class DriveControlNode(Node):
         if self.is_input_stale():
             steer_pwm = 0
             drive_pwm = 0
-            self.requested_steer_direction = 0
+            self.target_steer_angle_deg = self.steer_angle_deg
             self.active_steer_direction = 0
-            self.steer_pulse_until = None
 
         self.write_command(steer_pwm, drive_pwm)
         self.read_arduino_debug()
 
+    def update_steer_position(self, now):
+        """직전 출력 방향과 경과 시간으로 현재 조향각을 추정한다."""
+        if self.last_steer_update_time is None:
+            self.last_steer_update_time = now
+            return
+
+        dt = (now - self.last_steer_update_time).nanoseconds / 1e9
+        self.last_steer_update_time = now
+        if dt <= 0.0 or self.active_steer_direction == 0:
+            return
+
+        self.steer_angle_deg = self.clamp_steer_angle(
+            self.steer_angle_deg
+            + self.active_steer_direction * self.steer_speed_deg_per_sec * dt
+        )
+
     def current_steer_pwm(self):
-        """진행 중인 조향 펄스가 있으면 그 PWM을, 펄스가 끝났으면 0을 반환."""
-        if self.active_steer_direction == 0 or self.steer_pulse_until is None:
-            return 0
+        """요청 방향과 추정 위치로 이번 주기에 보낼 조향 PWM을 계산한다."""
+        direction = self.steer_output_direction()
+        self.active_steer_direction = direction
+        return direction * self.steer_pwm
 
-        now_ns = self.get_clock().now().nanoseconds
-        if now_ns >= self.steer_pulse_until:
-            # 펄스 시간이 끝났으므로 조향 정지
-            self.active_steer_direction = 0
-            self.steer_pulse_until = None
-            return 0
+    def steer_output_direction(self):
+        """현재 추정 각도가 목표 각도에 가까워질 때까지 조향한다."""
+        tolerance = self.steer_angle_tolerance_deg
+        error = self.target_steer_angle_deg - self.steer_angle_deg
 
-        return self.active_steer_direction * self.steer_pwm
+        if abs(error) <= tolerance:
+            self.steer_angle_deg = self.target_steer_angle_deg
+            return 0
+        return 1 if error > 0.0 else -1
 
     def is_input_stale(self):
         """마지막 /motor_control 수신 이후 input_timeout 이상 지났는지."""
@@ -250,7 +260,7 @@ class DriveControlNode(Node):
         import time
 
         steer_pwm = self.clamp_signed_pwm(steer_pwm)
-        drive_pwm = self.clamp_signed_pwm(drive_pwm)
+        drive_pwm = self.clamp_drive_pwm(drive_pwm)
         command = (steer_pwm, drive_pwm)
 
         # 명령이 그대로이고 재전송 간격이 안 지났으면 생략(시리얼 트래픽 절약)
@@ -341,6 +351,17 @@ class DriveControlNode(Node):
     def clamp_signed_pwm(self, value):
         """-255~255 범위로 제한(부호 있는 PWM)."""
         return max(-255, min(255, int(value)))
+
+    def clamp_drive_pwm(self, value):
+        """구동 PWM을 -max_drive_pwm~+max_drive_pwm 안전 범위로 제한한다."""
+        return max(-self.max_drive_pwm, min(self.max_drive_pwm, int(value)))
+
+    def clamp_steer_angle(self, value):
+        """추정 조향각을 왼쪽/오른쪽 한계 안으로 제한한다."""
+        return max(
+            -self.steer_max_angle_deg,
+            min(self.steer_max_angle_deg, float(value)),
+        )
 
     def log_error_throttled(self, message):
         """같은 에러 로그를 5초에 한 번만 출력(로그 폭주 방지)."""

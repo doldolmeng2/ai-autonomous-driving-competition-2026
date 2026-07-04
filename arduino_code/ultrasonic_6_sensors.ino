@@ -27,13 +27,11 @@
     디버그 문장을 출력하면 ROS 노드가 파싱하지 못할 수 있다.
 */
 
-const int ACTIVE_SENSOR_COUNT = 5;  // 센서 5개만 쓸 때는 5로 변경
+const int ACTIVE_SENSOR_COUNT = 6;  // 센서 5개만 쓸 때는 5로 변경
 
 // // Arduino Mega 기준 기본 핀. 앞에서부터 ACTIVE_SENSOR_COUNT개만 사용함.
-// const int TRIG_PINS[] = {22, 24, 26, 28, 30, 32};
-// const int ECHO_PINS[] = {23, 25, 27, 29, 31, 33};
-const int TRIG_PINS[] = {22, 24, 26, 28, 30};
-const int ECHO_PINS[] = {23, 25, 27, 29, 31};
+const int TRIG_PINS[] = {22, 24, 26, 28, 30, 32};
+const int ECHO_PINS[] = {23, 25, 27, 29, 31, 33};
 
 const int CONFIGURED_SENSOR_COUNT = sizeof(TRIG_PINS) / sizeof(TRIG_PINS[0]);
 const int SENSOR_COUNT = min(ACTIVE_SENSOR_COUNT, CONFIGURED_SENSOR_COUNT);

@@ -22,8 +22,7 @@
 출력 값의 의미(drive_control 과 맞춤):
     - speed : 구동 모터 PWM (부호=전/후진). drive_control 이 max_drive_pwm 으로
               최종 안전 clamp 한다.
-    - steer : 조향 명령. drive_control 은 이 값의 "부호"로 방향을 정한다.
-              (크기는 향후 확장 대비용으로 스케일해서 실어 보낸다)
+    - steer : 목표 조향각(deg). drive_control 이 +/-45도 안전 범위로 최종 clamp 한다.
 """
 
 import rclpy
@@ -49,9 +48,9 @@ class JoyToMotorNode(Node):
         self.declare_parameter('invert_drive_axis', True)
         # 미세한 스틱 흔들림 무시(중립 근처 데드존)
         self.declare_parameter('deadzone', 0.2)
-        # 스틱 최대치일 때 내보낼 speed/steer 크기
+        # 스틱 최대치일 때 내보낼 speed PWM / steer 목표각(deg)
         self.declare_parameter('max_speed', 255)
-        self.declare_parameter('max_steer', 255)
+        self.declare_parameter('max_steer', 45)
 
         self.steer_axis = int(self.get_parameter('steer_axis').value)
         self.drive_axis = int(self.get_parameter('drive_axis').value)

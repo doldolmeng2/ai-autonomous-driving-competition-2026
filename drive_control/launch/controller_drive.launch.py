@@ -38,7 +38,7 @@ def generate_launch_description():
                 'invert_drive_axis': True,
                 'deadzone': 0.2,
                 'max_speed': 130,
-                'max_steer': 255,
+                'max_steer': 45,
             }],
         ),
         Node(
@@ -57,8 +57,9 @@ def generate_launch_description():
                 'enable_tx_debug_log': False,
                 'max_drive_pwm': 130,
                 'steer_pwm': 150,
-                'steer_deadband': 0,
-                'steer_pulse_duration': 1.0,
+                'steer_max_angle_deg': 45.0,
+                'steer_center_time': 0.45,
+                'steer_angle_tolerance_deg': 1.0,
             }],
         ),
     ])
