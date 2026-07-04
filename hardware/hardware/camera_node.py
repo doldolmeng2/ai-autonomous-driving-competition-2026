@@ -176,7 +176,7 @@ class CameraPublisher:
 
 
 class CameraNode(Node):
-    """Publish left/right USB camera frames and CameraInfo messages."""
+    """Publish high/low USB camera frames and CameraInfo messages."""
 
     def __init__(self):
         super().__init__('camera_node')
@@ -187,7 +187,7 @@ class CameraNode(Node):
         self.declare_parameter('auto_fallback_devices', True)
         self.declare_parameter('required_name_substring', 'C920')
 
-        for side, device in (('left', '/dev/video4'), ('right', '/dev/video6')):
+        for side, device in (('high', '/dev/video4'), ('low', '/dev/video6')):
             self.declare_parameter(f'{side}.device', device)
             self.declare_parameter(f'{side}.frame_id', f'camera_{side}')
             self.declare_parameter(f'{side}.image_topic', f'/camera/{side}/image_raw')
@@ -202,7 +202,7 @@ class CameraNode(Node):
 
         used_devices = set()
         self.camera_publishers = []
-        for side in ('left', 'right'):
+        for side in ('high', 'low'):
             preferred = self.get_parameter(f'{side}.device').value
             device = self.resolve_device(side, preferred, used_devices)
             if device:

@@ -11,8 +11,8 @@ class CameraViewerNode(Node):
 
     def __init__(self):
         super().__init__('camera_viewer_node')
-        self.declare_parameter('left_image_topic', '/camera/left/image_raw')
-        self.declare_parameter('right_image_topic', '/camera/right/image_raw')
+        self.declare_parameter('high_image_topic', '/camera/high/image_raw')
+        self.declare_parameter('low_image_topic', '/camera/low/image_raw')
         self.declare_parameter('window_prefix', 'camera')
 
         qos = QoSProfile(
@@ -23,14 +23,14 @@ class CameraViewerNode(Node):
         self.window_prefix = self.get_parameter('window_prefix').value
         self.create_subscription(
             Image,
-            self.get_parameter('left_image_topic').value,
-            lambda msg: self.show_image('left', msg),
+            self.get_parameter('high_image_topic').value,
+            lambda msg: self.show_image('high', msg),
             qos,
         )
         self.create_subscription(
             Image,
-            self.get_parameter('right_image_topic').value,
-            lambda msg: self.show_image('right', msg),
+            self.get_parameter('low_image_topic').value,
+            lambda msg: self.show_image('low', msg),
             qos,
         )
         self.timer = self.create_timer(0.03, lambda: cv2.waitKey(1))

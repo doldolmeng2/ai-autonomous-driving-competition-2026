@@ -13,15 +13,15 @@ class CameraCalibrationNode(Node):
 
     def __init__(self):
         super().__init__('camera_calibration_node')
-        self.declare_parameter('left_image_topic', '/camera/left/image_raw')
-        self.declare_parameter('right_image_topic', '/camera/right/image_raw')
+        self.declare_parameter('high_image_topic', '/camera/high/image_raw')
+        self.declare_parameter('low_image_topic', '/camera/low/image_raw')
         self.declare_parameter('output_dir', 'calibration/stereo')
         self.declare_parameter('window_name', 'camera_calibration')
 
         self.output_dir = Path(self.get_parameter('output_dir').value).expanduser()
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.window_name = self.get_parameter('window_name').value
-        self.latest = {'left': None, 'right': None}
+        self.latest = {'high': None, 'low': None}
         self.capture_index = self.next_capture_index()
 
         qos = QoSProfile(
@@ -31,20 +31,20 @@ class CameraCalibrationNode(Node):
         )
         self.create_subscription(
             Image,
-            self.get_parameter('left_image_topic').value,
-            lambda msg: self.image_callback('left', msg),
+            self.get_parameter('high_image_topic').value,
+            lambda msg: self.image_callback('high', msg),
             qos,
         )
         self.create_subscription(
             Image,
-            self.get_parameter('right_image_topic').value,
-            lambda msg: self.image_callback('right', msg),
+            self.get_parameter('low_image_topic').value,
+            lambda msg: self.image_callback('low', msg),
             qos,
         )
         self.timer = self.create_timer(0.03, self.draw)
 
     def next_capture_index(self):
-        existing = sorted(self.output_dir.glob('left-*.png'))
+        existing = sorted(self.output_dir.glob('high-*.png'))
         if not existing:
             return 0
         return int(existing[-1].stem.split('-')[-1]) + 1
@@ -72,7 +72,7 @@ class CameraCalibrationNode(Node):
 
     def draw(self):
         frames = []
-        for side in ('left', 'right'):
+        for side in ('high', 'low'):
             frame = self.latest[side]
             if frame is None:
                 frame = np.zeros((360, 640, 3), dtype=np.uint8)
@@ -107,14 +107,14 @@ class CameraCalibrationNode(Node):
             cv2.destroyWindow(self.window_name)
 
     def save_pair(self):
-        if self.latest['left'] is None or self.latest['right'] is None:
-            self.get_logger().warn('Both left and right frames are required.')
+        if self.latest['high'] is None or self.latest['low'] is None:
+            self.get_logger().warn('Both high and low frames are required.')
             return
-        left_path = self.output_dir / f'left-{self.capture_index:04d}.png'
-        right_path = self.output_dir / f'right-{self.capture_index:04d}.png'
-        cv2.imwrite(str(left_path), self.latest['left'])
-        cv2.imwrite(str(right_path), self.latest['right'])
-        self.get_logger().info(f'Saved {left_path} and {right_path}')
+        high_path = self.output_dir / f'high-{self.capture_index:04d}.png'
+        low_path = self.output_dir / f'low-{self.capture_index:04d}.png'
+        cv2.imwrite(str(high_path), self.latest['high'])
+        cv2.imwrite(str(low_path), self.latest['low'])
+        self.get_logger().info(f'Saved {high_path} and {low_path}')
         self.capture_index += 1
 
     def destroy_node(self):
