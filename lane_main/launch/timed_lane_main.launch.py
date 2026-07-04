@@ -1,8 +1,59 @@
+from pathlib import Path
+
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
 def generate_launch_description():
+    hardware_share = Path(get_package_share_directory('hardware'))
+
+    serial_port = LaunchConfiguration('serial_port')
+
     return LaunchDescription([
-        Node(package='lane_main', executable='timed_lane_main_node', output='screen'),
+        DeclareLaunchArgument(
+            'serial_port',
+            default_value='auto',
+            description='Arduino serial port. Use auto, /dev/ttyACM0, or /dev/ttyUSB0.',
+        ),
+        Node(
+            package='hardware',
+            executable='camera_node',
+            output='screen',
+            parameters=[str(hardware_share / 'config' / 'camera.yaml')],
+        ),
+        # 카메라(high) -> 오른쪽 차선 기준 offset 계산
+        Node(
+            package='lane_offset',
+            executable='timed_lane_offset_node',
+            output='screen',
+        ),
+        # offset -> steer/speed 계산
+        Node(
+            package='lane_main',
+            executable='timed_lane_main_node',
+            output='screen',
+        ),
+        Node(
+            package='drive_control',
+            executable='drive_control_node',
+            output='screen',
+            parameters=[{
+                'motor_control_topic': '/motor_control',
+                'serial_port': serial_port,
+                'baudrate': 115200,
+                'command_rate': 20.0,
+                'command_resend_interval': 0.1,
+                'input_timeout': 0.5,
+                'arduino_boot_delay': 5.0,
+                'enable_arduino_debug_log': False,
+                'enable_tx_debug_log': False,
+                'max_drive_pwm': 130,
+                'steer_pwm': 150,
+                'steer_deadband': 0,
+                'steer_pulse_duration': 1.0,
+            }],
+        ),
     ])

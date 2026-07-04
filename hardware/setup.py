@@ -32,6 +32,7 @@ setup(
             'ultrasonic_viewer_node = hardware.ultrasonic_viewer_node:main',
             'camera_calibration_node = hardware.camera_calibration_node:main',
             'camera_pose_check_node = hardware.camera_pose_check_node:main',
+            'hsv_tuner_node = hardware.hsv_tuner_node:main',
         ],
     },
 )

@@ -4,11 +4,11 @@
 
 | Node | Subscribe | Publish |
 | --- | --- | --- |
-| `camera_node` | - | `/camera/left/image_raw` `sensor_msgs/Image`, `/camera/left/camera_info` `sensor_msgs/CameraInfo`, `/camera/right/image_raw` `sensor_msgs/Image`, `/camera/right/camera_info` `sensor_msgs/CameraInfo` |
+| `camera_node` | - | `/camera/high/image_raw` `sensor_msgs/Image`, `/camera/high/camera_info` `sensor_msgs/CameraInfo`, `/camera/low/image_raw` `sensor_msgs/Image`, `/camera/low/camera_info` `sensor_msgs/CameraInfo` |
 | `sllidar_node` | - | `/scan` `sensor_msgs/LaserScan` |
 | `ultrasonic_node` | - | `/ultrasonic/range_1` ... `/ultrasonic/range_6` `sensor_msgs/Range`, `/ultrasonic/ranges` `std_msgs/Float32MultiArray` |
 | `manual_controller_node` | - | `/manual_controller/joy` `sensor_msgs/Joy` |
-| `camera_viewer_node` | `/camera/left/image_raw` `sensor_msgs/Image`, `/camera/right/image_raw` `sensor_msgs/Image` | OpenCV windows |
+| `camera_viewer_node` | `/camera/high/image_raw` `sensor_msgs/Image`, `/camera/low/image_raw` `sensor_msgs/Image` | OpenCV windows |
 | `lidar_viewer_node` | `/scan` `sensor_msgs/LaserScan` | OpenCV radar window |
 | `ultrasonic_viewer_node` | `/ultrasonic/*/range` `sensor_msgs/Range` | OpenCV range window |
 
@@ -30,8 +30,8 @@ ros2 launch drive_control controller_drive.launch.py
 Current tested camera mapping:
 
 ```text
-/dev/video4 -> C920 left camera
-/dev/video6 -> C920 right camera
+/dev/video4 -> C920 high camera
+/dev/video6 -> C920 low camera
 ```
 
 `camera_node` requires the video device name to contain `C920`; it does not fall

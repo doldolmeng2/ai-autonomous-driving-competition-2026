@@ -1,3 +1,4 @@
+from glob import glob
 from setuptools import find_packages, setup
 
 package_name = 'lane_offset'
@@ -9,6 +10,7 @@ setup(
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        ('share/' + package_name + '/launch', glob('launch/*.launch.py')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -20,6 +22,7 @@ setup(
         'console_scripts': [
             'timed_lane_offset_node = lane_offset.timed_lane_offset_node:main',
             'mission_lane_offset_node = lane_offset.mission_lane_offset_node:main',
+            'lane_offset_debug_viewer_node = lane_offset.lane_offset_debug_viewer_node:main',
         ],
     },
 )

@@ -11,8 +11,8 @@ class CameraPoseCheckNode(Node):
 
     def __init__(self):
         super().__init__('camera_pose_check_node')
-        self.declare_parameter('left_image_topic', '/camera/left/image_raw')
-        self.declare_parameter('right_image_topic', '/camera/right/image_raw')
+        self.declare_parameter('high_image_topic', '/camera/high/image_raw')
+        self.declare_parameter('low_image_topic', '/camera/low/image_raw')
         self.declare_parameter('chessboard_cols', 8)
         self.declare_parameter('chessboard_rows', 6)
         self.declare_parameter('window_name', 'camera_pose_check')
@@ -22,7 +22,7 @@ class CameraPoseCheckNode(Node):
             int(self.get_parameter('chessboard_rows').value),
         )
         self.window_name = self.get_parameter('window_name').value
-        self.latest = {'left': None, 'right': None}
+        self.latest = {'high': None, 'low': None}
 
         qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -31,14 +31,14 @@ class CameraPoseCheckNode(Node):
         )
         self.create_subscription(
             Image,
-            self.get_parameter('left_image_topic').value,
-            lambda msg: self.image_callback('left', msg),
+            self.get_parameter('high_image_topic').value,
+            lambda msg: self.image_callback('high', msg),
             qos,
         )
         self.create_subscription(
             Image,
-            self.get_parameter('right_image_topic').value,
-            lambda msg: self.image_callback('right', msg),
+            self.get_parameter('low_image_topic').value,
+            lambda msg: self.image_callback('low', msg),
             qos,
         )
         self.timer = self.create_timer(0.03, self.draw)
@@ -66,7 +66,7 @@ class CameraPoseCheckNode(Node):
 
     def draw(self):
         frames = []
-        for side in ('left', 'right'):
+        for side in ('high', 'low'):
             frame = self.latest[side]
             if frame is None:
                 frame = np.zeros((360, 640, 3), dtype=np.uint8)
