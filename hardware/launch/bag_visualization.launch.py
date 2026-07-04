@@ -6,20 +6,43 @@ from launch.actions import ExecuteProcess, LogInfo
 from launch_ros.actions import Node
 
 
-BAG_PATH = '/home/hailab/osy/260630/ai-autonomous-driving-competition-2026/rosbag2_2026_07_01-15_59_26'
+BAG_DIR = '/home/gill/bags'
+
+
+def find_bags(bag_dir):
+    root = Path(bag_dir)
+    if not root.is_dir():
+        return []
+    return sorted({p.parent for p in root.rglob('metadata.yaml')}, key=lambda p: p.name)
+
+
+def choose_bag(bags):
+    print(f'Available bags in {BAG_DIR}:')
+    for i, bag in enumerate(bags, start=1):
+        print(f'  {i}. {bag.name}')
+    while True:
+        choice = input(f'Select a bag [1-{len(bags)}]: ').strip()
+        if choice.isdigit() and 1 <= int(choice) <= len(bags):
+            return bags[int(choice) - 1]
+        print('Invalid selection, try again.')
+
 
 def generate_launch_description():
     share = Path(get_package_share_directory('hardware'))
-    bag_path = BAG_PATH.strip()
+    bags = find_bags(BAG_DIR)
 
-    if not bag_path:
+    if not bags:
         return LaunchDescription([
             LogInfo(
-                msg='Set BAG_PATH in hardware/launch/bag_visualization.launch.py first.'
+                msg=f'No rosbag found under BAG_DIR={BAG_DIR}. '
+                    'Set BAG_DIR in hardware/launch/bag_visualization.launch.py first.'
             ),
         ])
 
+    bag_path = str(choose_bag(bags))
+
     return LaunchDescription([
+        LogInfo(msg=f'Playing bag: {bag_path}'),
         ExecuteProcess(
             cmd=['ros2', 'bag', 'play', bag_path],
             output='screen',
