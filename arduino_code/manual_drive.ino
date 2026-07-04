@@ -35,8 +35,8 @@
 #define MOTOR2_IN1  11
 #define MOTOR2_IN2  10
 
-const int MAX_STEER_PWM = 40;
-const int MAX_DRIVE_PWM = 30;
+const int MAX_STEER_PWM = 150;
+const int MAX_DRIVE_PWM = 130;
 
 const unsigned long COMMAND_TIMEOUT_MS = 500;
 
