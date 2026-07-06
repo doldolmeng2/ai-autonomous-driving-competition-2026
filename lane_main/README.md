@@ -5,13 +5,13 @@
 | Node | Subscribe | Publish |
 | --- | --- | --- |
 | `timed_lane_main_node` | `/lane_offset` | `/motor_control` |
-| `mission_lane_main_node` | `/lane_info`, `/lane_offset` | `/motor_control` |
+| `mission_lane_main_node` | `/camera/low/image_raw`, `/ultrasonic/range_1` ... `/ultrasonic/range_6`, `/lane_offset` | `/lane_info`, `/motor_control` |
 
 PDF flow:
 
 ```text
 timed:   /lane_offset -> lane_main -> /motor_control -> drive_control
-mission: /lane_info + /lane_offset -> lane_main -> /motor_control -> drive_control
+mission: /camera/low/image_raw + ultrasonic + /lane_offset -> lane_main -> /lane_info + /motor_control -> drive_control
 ```
 
 Launch:

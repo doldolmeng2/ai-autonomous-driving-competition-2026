@@ -40,12 +40,13 @@ Timed lane driving:
 Mission lane driving:
 
 ```text
-/camera/high/image_raw + /camera/low/image_raw + /ultrasonic/range_1 ... /range_6
--> lane_offset/mission_lane_offset_node
--> /lane_info + /lane_offset
+/camera/low/image_raw + /ultrasonic/range_1 ... /range_6 + /lane_offset
 -> lane_main/mission_lane_main_node
--> /motor_control
--> drive_control/drive_control_node
+-> /lane_info + /motor_control
+
+/lane_info + /camera/high/image_raw
+-> lane_offset/mission_lane_offset_node
+-> /lane_offset
 ```
 
 Parking:

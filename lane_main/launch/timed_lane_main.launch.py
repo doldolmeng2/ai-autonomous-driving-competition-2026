@@ -27,9 +27,8 @@ def generate_launch_description():
             executable='timed_lane_main_node',
             output='screen',
             parameters=[{
-                'steer_kp': 0.6,
                 'base_speed': 30,
-                'max_steer': 200,
+                'max_steer': 45,
             }],
         ),
         Node(

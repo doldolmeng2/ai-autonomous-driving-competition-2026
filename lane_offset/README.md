@@ -5,12 +5,12 @@
 | Node | Subscribe | Publish |
 | --- | --- | --- |
 | `timed_lane_offset_node` | `/camera/high/image_raw` | `/lane_offset` |
-| `mission_lane_offset_node` | `/camera/high/image_raw`, `/camera/low/image_raw`, `/ultrasonic/range_1` ... `/ultrasonic/range_6` | `/lane_info`, `/lane_offset` |
+| `mission_lane_offset_node` | `/lane_info`, `/camera/high/image_raw` | `/lane_offset` |
 | `lane_offset_debug_viewer_node` | `/lane_offset/debug_image` | OpenCV window |
 
 PDF flow:
 
 ```text
 timed:   /camera/high/image_raw -> lane_offset -> /lane_offset
-mission: camera high/low + ultrasonic -> lane_offset -> /lane_info + /lane_offset
+mission: /lane_info + /camera/high/image_raw -> lane_offset -> /lane_offset
 ```
