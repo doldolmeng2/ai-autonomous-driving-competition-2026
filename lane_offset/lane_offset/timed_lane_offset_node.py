@@ -98,8 +98,6 @@ MIN_LINE_HEIGHT_PX = 20
 # 실차 대회 주행 시에는 CPU 절약을 위해 False로 끄는 것을 권장.
 DEBUG_VIEW = True
 WINDOW_NAME = 'timed_lane_offset_debug'
-# 원격 모니터링 등을 위해 같은 화면을 토픽으로도 발행하고 싶을 때만 True
-PUBLISH_DEBUG_IMAGE = False
 DEBUG_IMAGE_TOPIC = '/lane_offset/debug_image'
 
 
@@ -110,8 +108,6 @@ class TimedLaneOffsetNode(Node):
         super().__init__('timed_lane_offset_node')
 
         # ---- 파라미터 ------------------------------------------------------
-        self.declare_parameter('image_topic', IMAGE_TOPIC)
-        self.declare_parameter('lane_offset_topic', LANE_OFFSET_TOPIC)
         self.declare_parameter('roi_top', ROI_TOP)
         self.declare_parameter('roi_bottom', ROI_BOTTOM)
         self.declare_parameter('white_s_max', WHITE_S_MAX)
@@ -133,12 +129,9 @@ class TimedLaneOffsetNode(Node):
         self.declare_parameter('min_line_aspect_ratio', MIN_LINE_ASPECT_RATIO)
         self.declare_parameter('min_line_height_px', MIN_LINE_HEIGHT_PX)
         self.declare_parameter('debug_view', DEBUG_VIEW)
-        self.declare_parameter('window_name', WINDOW_NAME)
-        self.declare_parameter('publish_debug_image', PUBLISH_DEBUG_IMAGE)
-        self.declare_parameter('debug_image_topic', DEBUG_IMAGE_TOPIC)
 
-        self.image_topic = self.get_parameter('image_topic').value
-        self.lane_offset_topic = self.get_parameter('lane_offset_topic').value
+        self.image_topic = IMAGE_TOPIC
+        self.lane_offset_topic = LANE_OFFSET_TOPIC
         self.roi_top = int(self.get_parameter('roi_top').value)
         self.roi_bottom = int(self.get_parameter('roi_bottom').value)
         self.white_s_max = int(self.get_parameter('white_s_max').value)
@@ -166,11 +159,9 @@ class TimedLaneOffsetNode(Node):
         )
         self.min_line_height_px = int(self.get_parameter('min_line_height_px').value)
         self.debug_view = bool(self.get_parameter('debug_view').value)
-        self.window_name = self.get_parameter('window_name').value
-        self.publish_debug_image = bool(
-            self.get_parameter('publish_debug_image').value
-        )
-        self.debug_image_topic = self.get_parameter('debug_image_topic').value
+        self.window_name = WINDOW_NAME
+        self.publish_debug_image = False
+        self.debug_image_topic = DEBUG_IMAGE_TOPIC
 
         # 마지막으로 발행한(유효했던) offset. 오검출 프레임에서는 이 값을 그대로 재사용.
         self.last_offset = 0

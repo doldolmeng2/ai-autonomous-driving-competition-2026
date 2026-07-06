@@ -3,7 +3,7 @@
 <package format="3">
   <name>drive_control</name>
   <version>0.0.0</version>
-  <description>Manual controller to Arduino drive control bridge.</description>
+  <description>Controller and autonomy command bridge to Arduino drive control.</description>
   <maintainer email="hailab@example.com">hailab</maintainer>
   <license>TODO: License declaration</license>
 

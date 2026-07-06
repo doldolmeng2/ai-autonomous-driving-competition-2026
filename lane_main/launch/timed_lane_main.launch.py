@@ -2,22 +2,13 @@ from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
 def generate_launch_description():
     sensor_topic_share = Path(get_package_share_directory('sensor_topic'))
 
-    serial_port = LaunchConfiguration('serial_port')
-
     return LaunchDescription([
-        DeclareLaunchArgument(
-            'serial_port',
-            default_value='auto',
-            description='Arduino serial port. Use auto, /dev/ttyACM0, or /dev/ttyUSB0.',
-        ),
         Node(
             package='sensor_topic',
             executable='camera_node',
@@ -35,25 +26,22 @@ def generate_launch_description():
             package='lane_main',
             executable='timed_lane_main_node',
             output='screen',
+            parameters=[{
+                'steer_kp': 0.6,
+                'base_speed': 30,
+                'max_steer': 200,
+            }],
         ),
         Node(
             package='drive_control',
             executable='drive_control_node',
             output='screen',
             parameters=[{
-                'motor_control_topic': '/motor_control',
-                'serial_port': serial_port,
-                'baudrate': 115200,
-                'command_rate': 20.0,
-                'command_resend_interval': 0.1,
-                'input_timeout': 0.5,
-                'arduino_boot_delay': 5.0,
-                'enable_arduino_debug_log': False,
-                'enable_tx_debug_log': False,
                 'max_drive_pwm': 130,
                 'steer_pwm': 150,
-                'steer_deadband': 0,
-                'steer_pulse_duration': 1.0,
+                'steer_max_angle_deg': 45.0,
+                'steer_center_time': 0.45,
+                'steer_angle_tolerance_deg': 1.0,
             }],
         ),
     ])

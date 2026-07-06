@@ -2,49 +2,71 @@
 
 ## Build
 
-ROS2 Humble 환경을 먼저 불러온 뒤 `colcon`으로 워크스페이스를 빌드한다.
-
 ```bash
-cd /home/hailab/osy/260630/ai-autonomous-driving-competition-2026
 source /opt/ros/humble/setup.bash
 colcon build --symlink-install
 source install/setup.bash
 ```
 
-특정 패키지만 빌드하려면:
+패키지별 빌드:
 
 ```bash
 colcon build --symlink-install --packages-select sensor_topic sensor_utils
-source install/setup.bash
-```
-
-컨트롤러/아두이노 드라이브 패키지만 빌드하려면:
-
-```bash
 colcon build --symlink-install --packages-select drive_control
-source install/setup.bash
+colcon build --symlink-install --packages-select lane_offset lane_main parking
 ```
 
-## ROS2 Run / Launch
+## PDF Topic Flow
 
-ROS1의 `rosrun`, `roslaunch` 대신 ROS2에서는 아래 명령을 사용한다.
-
-```bash
-ros2 run <패키지명> <실행파일명>
-ros2 launch <패키지명> <launch파일명>
+```text
+sensor_topic/camera_node -> /camera/high/image_raw
+sensor_topic/camera_node -> /camera/low/image_raw
+sensor_topic/ultrasonic_node -> /ultrasonic/range_1 ... /ultrasonic/range_6
+sllidar_ros2 -> /scan
+sensor_topic/controller_node -> /controller/joy
 ```
 
-예시:
+Timed lane driving:
 
-```bash
-ros2 run sensor_topic controller_node
-ros2 run drive_control drive_control_node
-ros2 launch drive_control controller_drive.launch.py
+```text
+/camera/high/image_raw
+-> lane_offset/timed_lane_offset_node
+-> /lane_offset
+-> lane_main/timed_lane_main_node
+-> /motor_control
+-> drive_control/drive_control_node
 ```
 
-launch 파일을 수정했거나 새로 옮겼으면 다시 빌드 후 `source install/setup.bash`를 실행해야 한다.
+Mission lane driving:
 
-## Hardware Launch
+```text
+/camera/high/image_raw + /camera/low/image_raw + /ultrasonic/range_1 ... /range_6
+-> lane_offset/mission_lane_offset_node
+-> /lane_info + /lane_offset
+-> lane_main/mission_lane_main_node
+-> /motor_control
+-> drive_control/drive_control_node
+```
+
+Parking:
+
+```text
+/camera/high/image_raw + /ultrasonic/range_1 ... /range_6 + /scan
+-> parking/parking_node
+-> /motor_control
+-> drive_control/drive_control_node
+```
+
+Controller drive:
+
+```text
+/controller/joy
+-> sensor_utils/joy_to_motor_node
+-> /motor_control
+-> drive_control/drive_control_node
+```
+
+## Launch
 
 센서 토픽 발행:
 
@@ -52,86 +74,55 @@ launch 파일을 수정했거나 새로 옮겼으면 다시 빌드 후 `source i
 ros2 launch sensor_topic sensors.launch.py
 ```
 
-라이다만 단독 실행:
-
-```bash
-ros2 launch sllidar_ros2 sllidar_a1_launch.py
-```
-
-`sensor_topic`의 센서 관련 launch는 내부에서 위 Slamtec A1 launch를 불러와 `/scan`을 발행한다.
-
-발행 토픽:
-
-```text
-/camera/left/image_raw
-/camera/left/camera_info
-/camera/right/image_raw
-/camera/right/camera_info
-/scan
-/ultrasonic/range_1
-/ultrasonic/range_2
-/ultrasonic/range_3
-/ultrasonic/range_4
-/ultrasonic/range_5
-/ultrasonic/range_6
-/ultrasonic/ranges
-```
-
-센서 시각화:
-
-```bash
-ros2 launch sensor_utils sensor_visualization.launch.py
-```
-
-컨트롤러 수신기 토픽 발행 + 아두이노 모터 제어:
+수동 주행:
 
 ```bash
 ros2 launch drive_control controller_drive.launch.py
 ```
 
-실행되는 노드:
-
-```text
-sensor_topic/controller_node -> /controller/joy 발행
-drive_control/drive_control_node -> /controller/joy 구독 후 Arduino serial 송신
-```
-
-아두이노 포트가 자동 탐색되지 않으면 직접 지정한다.
+시간주행:
 
 ```bash
-ros2 launch drive_control controller_drive.launch.py serial_port:=/dev/ttyACM0
+ros2 launch lane_main timed_lane_main.launch.py
 ```
 
-아두이노에는 `steer drive` 형식의 두 정수를 115200 baud로 보낸다. 현재 안전값은 다음과 같다.
-
-```text
-속도: -30 ~ 30 PWM
-조향: -40 또는 40 PWM을 1초만 송신, 이후 0
-```
-
-센서 발행과 rosbag 기록:
+차선 미션:
 
 ```bash
-ros2 launch sensor_utils sensors_bag.launch.py
+ros2 launch lane_main mission_lane_main.launch.py
 ```
 
-센서, 컨트롤러, rosbag 기록:
+주차:
 
 ```bash
-ros2 launch sensor_utils sensors_controller_bag.launch.py
+ros2 launch parking mission_parking.launch.py
 ```
 
-카메라 캘리브레이션 이미지 저장:
+센서 시각화/캘리브레이션/bag:
 
 ```bash
+ros2 launch sensor_utils sensor_visualization.launch.py
 ros2 launch sensor_utils camera_calibration.launch.py
-```
-
-카메라 위치/각도 확인:
-
-```bash
 ros2 launch sensor_utils camera_pose_check.launch.py
+ros2 launch sensor_utils sensors_bag.launch.py
+ros2 launch sensor_utils sensors_controller_bag.launch.py
+ros2 launch sensor_utils bag_visualization.launch.py
 ```
+
+## Topics
+
+| Topic | Type |
+| --- | --- |
+| `/camera/high/image_raw` | `sensor_msgs/Image` |
+| `/camera/high/camera_info` | `sensor_msgs/CameraInfo` |
+| `/camera/low/image_raw` | `sensor_msgs/Image` |
+| `/camera/low/camera_info` | `sensor_msgs/CameraInfo` |
+| `/scan` | `sensor_msgs/LaserScan` |
+| `/ultrasonic/range_1` ... `/ultrasonic/range_6` | `sensor_msgs/Range` |
+| `/controller/joy` | `sensor_msgs/Joy` |
+| `/lane_info` | `std_msgs/Int16` |
+| `/lane_offset` | `std_msgs/Int16` |
+| `/motor_control` | `std_msgs/Int16MultiArray` |
 
 ## Device Notes
 
@@ -141,14 +132,4 @@ RPLidar A1이 `/dev/ttyUSB0`에서 `Permission denied`가 나면:
 sudo usermod -aG dialout $USER
 ```
 
-그 다음 로그아웃/로그인 후 다시 실행한다. 로그아웃 전 현재 터미널에서 임시로 테스트하려면:
-
-```bash
-sg dialout -c "ros2 launch sensor_topic sensors.launch.py"
-```
-
-컨트롤러 수신기는 기본값으로 `/dev/input/js*`를 자동 탐색한다. 현재 테스트된 장치는:
-
-```text
-Xbox 360 Wireless Receiver -> /dev/input/js0
-```
+그 다음 로그아웃/로그인 후 다시 실행한다.

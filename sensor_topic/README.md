@@ -1,67 +1,28 @@
-# sensor_topic package
+# sensor_topic
 
-## Topic flow
+PDF 기준 센서/컨트롤러 원본 토픽 발행 패키지다.
 
 | Node | Subscribe | Publish |
 | --- | --- | --- |
-| `camera_node` | - | `/camera/high/image_raw` `sensor_msgs/Image`, `/camera/high/camera_info` `sensor_msgs/CameraInfo`, `/camera/low/image_raw` `sensor_msgs/Image`, `/camera/low/camera_info` `sensor_msgs/CameraInfo` |
-| `sllidar_node` | - | `/scan` `sensor_msgs/LaserScan` |
-| `ultrasonic_node` | - | `/ultrasonic/range_1` ... `/ultrasonic/range_6` `sensor_msgs/Range`, `/ultrasonic/ranges` `std_msgs/Float32MultiArray` |
-| `controller_node` | - | `/controller/joy` `sensor_msgs/Joy` |
-| `camera_viewer_node` | `/camera/high/image_raw` `sensor_msgs/Image`, `/camera/low/image_raw` `sensor_msgs/Image` | OpenCV windows |
-| `lidar_viewer_node` | `/scan` `sensor_msgs/LaserScan` | OpenCV radar window |
-| `ultrasonic_viewer_node` | `/ultrasonic/*/range` `sensor_msgs/Range` | OpenCV range window |
+| `camera_node` | - | `/camera/high/image_raw`, `/camera/high/camera_info`, `/camera/low/image_raw`, `/camera/low/camera_info` |
+| `ultrasonic_node` | Arduino serial | `/ultrasonic/range_1` ... `/ultrasonic/range_6`, `/ultrasonic/ranges` |
+| `controller_node` | USB controller device | `/controller/joy` |
+| `sllidar_ros2` launch | RPLidar serial | `/scan` |
 
-Manual driving should normally flow as:
+Launch:
+
+```bash
+ros2 launch sensor_topic sensors.launch.py
+```
+
+`sensors.launch.py` starts `camera_node`, `ultrasonic_node`, `controller_node`,
+and includes the Slamtec A1 launch from `sllidar_ros2`.
+
+Device defaults:
 
 ```text
-USB controller -> controller_node -> /controller/joy
--> drive_control node -> Arduino -> motor driver
-```
-
-Manual driving launch is owned by the `drive_control` package:
-
-```bash
-ros2 launch drive_control controller_drive.launch.py
-```
-
-## Device notes
-
-Current tested camera mapping:
-
-```text
-/dev/video4 -> C920 high camera
-/dev/video6 -> C920 low camera
-```
-
-`camera_node` requires the video device name to contain `C920`; it does not fall
-back to non-C920 webcams.
-
-Current tested controller mapping:
-
-```text
-/dev/input/js0 -> Xbox 360 Wireless Receiver
-left stick vertical axis 1 -> drive forward/reverse
-right stick horizontal axis 3 -> steering
-```
-
-RPLidar A1 is expected on `/dev/ttyUSB0`. If it shows `Permission denied`,
-grant serial access once and log out/in:
-
-```bash
-sudo usermod -aG dialout $USER
-```
-
-Run the Slamtec A1 lidar directly with:
-
-```bash
-ros2 launch sllidar_ros2 sllidar_a1_launch.py
-```
-
-The `sensor_topic` sensor launch files include that same Slamtec launch.
-
-For a temporary test without logging out, run:
-
-```bash
-sudo chmod a+rw /dev/ttyUSB0
+/dev/video4 -> high camera
+/dev/video6 or auto -> low camera
+/dev/ttyUSB0 -> RPLidar A1
+/dev/input/js* -> controller
 ```

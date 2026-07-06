@@ -34,45 +34,46 @@ from std_msgs.msg import Int16MultiArray
 from drive_control.serial_port import open_serial
 
 
+MOTOR_CONTROL_TOPIC = '/motor_control'
+SERIAL_PORT = 'auto'
+BAUDRATE = 115200
+COMMAND_RATE = 20.0
+COMMAND_RESEND_INTERVAL = 0.1
+INPUT_TIMEOUT = 0.5
+ARDUINO_BOOT_DELAY = 4.0
+ENABLE_ARDUINO_DEBUG_LOG = True
+ENABLE_TX_DEBUG_LOG = False
+
+MAX_DRIVE_PWM = 130
+STEER_PWM = 150
+STEER_MAX_ANGLE_DEG = 45.0
+STEER_CENTER_TIME = 0.45
+STEER_ANGLE_TOLERANCE_DEG = 1.0
+
+
 class DriveControlNode(Node):
     """/motor_control (steer, speed)을 받아 아두이노로 안전하게 전달하는 노드."""
 
     def __init__(self):
         super().__init__('drive_control_node')
 
-        # ---- 파라미터 선언 -------------------------------------------------
-        # 구독 토픽 / 시리얼 연결 관련
-        self.declare_parameter('motor_control_topic', '/motor_control')
-        self.declare_parameter('serial_port', 'auto')       # 'auto' 또는 '/dev/ttyACM0' 등
-        self.declare_parameter('baudrate', 115200)
-        self.declare_parameter('command_rate', 20.0)        # 아두이노로 명령 보내는 주기(Hz)
-        self.declare_parameter('command_resend_interval', 0.1)  # 같은 명령 재전송 간격(s)
-        self.declare_parameter('input_timeout', 0.5)        # 이 시간 동안 입력 없으면 정지(s)
-        self.declare_parameter('arduino_boot_delay', 4.0)   # 시리얼 연결 후 아두이노 부팅 대기(s)
-        self.declare_parameter('enable_arduino_debug_log', True)  # 아두이노 -> PC 로그 출력
-        self.declare_parameter('enable_tx_debug_log', False)      # PC -> 아두이노 송신 로그 출력
+        self.motor_control_topic = MOTOR_CONTROL_TOPIC
+        self.serial_port_param = SERIAL_PORT
+        self.baudrate = BAUDRATE
+        self.command_resend_interval = COMMAND_RESEND_INTERVAL
+        self.input_timeout = INPUT_TIMEOUT
+        self.arduino_boot_delay = ARDUINO_BOOT_DELAY
+        self.enable_arduino_debug_log = ENABLE_ARDUINO_DEBUG_LOG
+        self.enable_tx_debug_log = ENABLE_TX_DEBUG_LOG
 
-        # 구동 / 조향 제어값 관련
-        self.declare_parameter('max_drive_pwm', 130)        # 구동 모터 안전 상한 PWM
-        self.declare_parameter('steer_pwm', 150)             # 조향할 때 넣는 PWM 크기
-        self.declare_parameter('steer_max_angle_deg', 45.0)  # 최대 좌/우 조향각(deg)
-        self.declare_parameter('steer_center_time', 0.45)    # 최대 꺾임에서 중앙까지 걸리는 시간(s)
-        self.declare_parameter('steer_angle_tolerance_deg', 1.0)  # 목표 도달 판정 여유(deg)
-
-        # ---- 파라미터 읽기 -------------------------------------------------
-        self.motor_control_topic = self.get_parameter('motor_control_topic').value
-        self.serial_port_param = self.get_parameter('serial_port').value
-        self.baudrate = int(self.get_parameter('baudrate').value)
-        command_rate = float(self.get_parameter('command_rate').value)
-        self.command_resend_interval = float(
-            self.get_parameter('command_resend_interval').value
+        self.declare_parameter('max_drive_pwm', MAX_DRIVE_PWM)
+        self.declare_parameter('steer_pwm', STEER_PWM)
+        self.declare_parameter('steer_max_angle_deg', STEER_MAX_ANGLE_DEG)
+        self.declare_parameter('steer_center_time', STEER_CENTER_TIME)
+        self.declare_parameter(
+            'steer_angle_tolerance_deg',
+            STEER_ANGLE_TOLERANCE_DEG,
         )
-        self.input_timeout = float(self.get_parameter('input_timeout').value)
-        self.arduino_boot_delay = float(self.get_parameter('arduino_boot_delay').value)
-        self.enable_arduino_debug_log = bool(
-            self.get_parameter('enable_arduino_debug_log').value
-        )
-        self.enable_tx_debug_log = bool(self.get_parameter('enable_tx_debug_log').value)
         self.max_drive_pwm = self.clamp_pwm(int(self.get_parameter('max_drive_pwm').value))
         self.steer_pwm = self.clamp_pwm(int(self.get_parameter('steer_pwm').value))
         self.steer_max_angle_deg = max(
@@ -112,7 +113,7 @@ class DriveControlNode(Node):
             Int16MultiArray, self.motor_control_topic, self.motor_control_callback, 10
         )
         # 일정 주기로 아두이노에 명령을 밀어 넣는 타이머
-        period = 1.0 / command_rate if command_rate > 0.0 else 1.0 / 20.0
+        period = 1.0 / COMMAND_RATE if COMMAND_RATE > 0.0 else 1.0 / 20.0
         self.timer = self.create_timer(period, self.timer_callback)
 
         self.get_logger().info(

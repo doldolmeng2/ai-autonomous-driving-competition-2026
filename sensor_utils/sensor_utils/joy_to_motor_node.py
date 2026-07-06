@@ -31,26 +31,31 @@ from sensor_msgs.msg import Joy
 from std_msgs.msg import Int16MultiArray
 
 
+JOY_TOPIC = '/controller/joy'
+MOTOR_CONTROL_TOPIC = '/motor_control'
+STEER_AXIS = 3
+DRIVE_AXIS = 1
+INVERT_STEER_AXIS = False
+INVERT_DRIVE_AXIS = True
+DEADZONE = 0.2
+MAX_SPEED = 255
+MAX_STEER = 45
+
+
 class JoyToMotorNode(Node):
     """Joy 입력을 /motor_control (steer, speed)로 변환해 발행하는 노드."""
 
     def __init__(self):
         super().__init__('joy_to_motor_node')
 
-        # ---- 파라미터 -----------------------------------------------------
-        self.declare_parameter('joy_topic', '/controller/joy')
-        self.declare_parameter('motor_control_topic', '/motor_control')
-        # 어떤 조이스틱 축을 조향/구동으로 쓸지 (controller 축 순서 기준)
-        self.declare_parameter('steer_axis', 3)
-        self.declare_parameter('drive_axis', 1)
-        # 축 방향이 반대로 느껴지면 True 로 뒤집는다
-        self.declare_parameter('invert_steer_axis', False)
-        self.declare_parameter('invert_drive_axis', True)
-        # 미세한 스틱 흔들림 무시(중립 근처 데드존)
-        self.declare_parameter('deadzone', 0.2)
-        # 스틱 최대치일 때 내보낼 speed PWM / steer 목표각(deg)
-        self.declare_parameter('max_speed', 255)
-        self.declare_parameter('max_steer', 45)
+        # 컨트롤러 기종/축 매핑이 바뀔 때 조정하는 값만 파라미터로 둔다.
+        self.declare_parameter('steer_axis', STEER_AXIS)
+        self.declare_parameter('drive_axis', DRIVE_AXIS)
+        self.declare_parameter('invert_steer_axis', INVERT_STEER_AXIS)
+        self.declare_parameter('invert_drive_axis', INVERT_DRIVE_AXIS)
+        self.declare_parameter('deadzone', DEADZONE)
+        self.declare_parameter('max_speed', MAX_SPEED)
+        self.declare_parameter('max_steer', MAX_STEER)
 
         self.steer_axis = int(self.get_parameter('steer_axis').value)
         self.drive_axis = int(self.get_parameter('drive_axis').value)
@@ -60,15 +65,14 @@ class JoyToMotorNode(Node):
         self.max_speed = int(self.get_parameter('max_speed').value)
         self.max_steer = int(self.get_parameter('max_steer').value)
 
-        motor_control_topic = self.get_parameter('motor_control_topic').value
-        joy_topic = self.get_parameter('joy_topic').value
-
         # ---- 통신 ---------------------------------------------------------
-        self.publisher = self.create_publisher(Int16MultiArray, motor_control_topic, 10)
-        self.create_subscription(Joy, joy_topic, self.joy_callback, 10)
+        self.publisher = self.create_publisher(
+            Int16MultiArray, MOTOR_CONTROL_TOPIC, 10
+        )
+        self.create_subscription(Joy, JOY_TOPIC, self.joy_callback, 10)
 
         self.get_logger().info(
-            f'Converting {joy_topic} -> {motor_control_topic} '
+            f'Converting {JOY_TOPIC} -> {MOTOR_CONTROL_TOPIC} '
             f'(steer_axis={self.steer_axis}, drive_axis={self.drive_axis}, '
             f'max_speed={self.max_speed}, max_steer={self.max_steer})'
         )

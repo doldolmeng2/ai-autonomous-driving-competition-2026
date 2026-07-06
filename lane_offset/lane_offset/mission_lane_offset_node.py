@@ -1,32 +1,32 @@
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
-from sensor_msgs.msg import Image, LaserScan
-from std_msgs.msg import Float32MultiArray, Int16, String
+from sensor_msgs.msg import Image, Range
+from std_msgs.msg import Int16
+
+
+HIGH_IMAGE_TOPIC = '/camera/high/image_raw'
+LOW_IMAGE_TOPIC = '/camera/low/image_raw'
+ULTRASONIC_TOPICS = [f'/ultrasonic/range_{index}' for index in range(1, 7)]
+LANE_INFO_TOPIC = '/lane_info'
+LANE_OFFSET_TOPIC = '/lane_offset'
+DEFAULT_LANE_NUMBER = 2
+DEFAULT_OFFSET = 0
 
 
 class MissionLaneOffsetNode(Node):
-    """Mission lane-offset topic contract node.
+    """Mission lane offset node.
 
-    Subscribes to the mission sensors and publishes /lane_offset for lane_main.
-    The image/lidar/ultrasonic callbacks are intentionally lightweight so the
-    real lane-change and obstacle-aware offset algorithm can be dropped in here.
+    PDF flow:
+        /camera/high/image_raw
+        /camera/low/image_raw
+        /ultrasonic/range_1 ... /ultrasonic/range_6
+            -> mission_lane_offset_node
+            -> /lane_info, /lane_offset
     """
 
     def __init__(self):
         super().__init__('mission_lane_offset_node')
-
-        self.declare_parameter('high_image_topic', '/camera/high/image_raw')
-        self.declare_parameter('low_image_topic', '/camera/low/image_raw')
-        self.declare_parameter('scan_topic', '/scan')
-        self.declare_parameter('ultrasonic_topic', '/ultrasonic/ranges')
-        self.declare_parameter('lane_offset_topic', '/lane_offset')
-        self.declare_parameter('status_topic', '/mission/lane_offset/status')
-        self.declare_parameter('default_offset', 0)
-
-        self.lane_offset_topic = self.get_parameter('lane_offset_topic').value
-        self.status_topic = self.get_parameter('status_topic').value
-        self.default_offset = int(self.get_parameter('default_offset').value)
 
         qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -34,61 +34,53 @@ class MissionLaneOffsetNode(Node):
             reliability=ReliabilityPolicy.BEST_EFFORT,
         )
 
-        self.offset_pub = self.create_publisher(Int16, self.lane_offset_topic, 10)
-        self.status_pub = self.create_publisher(String, self.status_topic, 10)
+        self.lane_info_pub = self.create_publisher(Int16, LANE_INFO_TOPIC, 10)
+        self.offset_pub = self.create_publisher(Int16, LANE_OFFSET_TOPIC, 10)
         self.create_subscription(
-            Image, self.get_parameter('high_image_topic').value,
-            self.high_image_callback, qos
+            Image,
+            HIGH_IMAGE_TOPIC,
+            self.high_image_callback,
+            qos,
         )
         self.create_subscription(
-            Image, self.get_parameter('low_image_topic').value,
-            self.low_image_callback, qos
+            Image,
+            LOW_IMAGE_TOPIC,
+            self.low_image_callback,
+            qos,
         )
-        self.create_subscription(
-            LaserScan, self.get_parameter('scan_topic').value,
-            self.scan_callback, qos
-        )
-        self.create_subscription(
-            Float32MultiArray, self.get_parameter('ultrasonic_topic').value,
-            self.ultrasonic_callback, 10
-        )
+        for topic in ULTRASONIC_TOPICS:
+            self.create_subscription(Range, topic, self.ultrasonic_callback, 10)
 
-        self.last_high_stamp = None
-        self.last_low_stamp = None
-        self.last_scan_count = 0
-        self.last_ultrasonic = []
-        self.timer = self.create_timer(0.1, self.publish_contract_output)
+        self.high_image = None
+        self.low_image = None
+        self.ultrasonic_ranges = {}
+        self.timer = self.create_timer(0.1, self.publish_outputs)
 
         self.get_logger().info(
-            'Subscribing camera high/low, /scan, /ultrasonic/ranges; '
-            f'publishing {self.lane_offset_topic} and {self.status_topic}'
+            f'Subscribing {HIGH_IMAGE_TOPIC}, {LOW_IMAGE_TOPIC}, '
+            f'{ULTRASONIC_TOPICS}; publishing {LANE_INFO_TOPIC}, '
+            f'{LANE_OFFSET_TOPIC}'
         )
 
     def high_image_callback(self, msg):
-        self.last_high_stamp = msg.header.stamp
+        self.high_image = msg
 
     def low_image_callback(self, msg):
-        self.last_low_stamp = msg.header.stamp
-
-    def scan_callback(self, msg):
-        self.last_scan_count = len(msg.ranges)
+        self.low_image = msg
 
     def ultrasonic_callback(self, msg):
-        self.last_ultrasonic = list(msg.data)
+        self.ultrasonic_ranges[msg.header.frame_id] = msg.range
 
-    def publish_contract_output(self):
+    def publish_outputs(self):
+        # TODO: Replace these defaults with mission lane recognition and
+        # obstacle-aware lane selection.
+        lane_info = Int16()
+        lane_info.data = DEFAULT_LANE_NUMBER
+        self.lane_info_pub.publish(lane_info)
+
         offset = Int16()
-        offset.data = self.default_offset
+        offset.data = DEFAULT_OFFSET
         self.offset_pub.publish(offset)
-
-        status = String()
-        status.data = (
-            f'high={self.last_high_stamp is not None}, '
-            f'low={self.last_low_stamp is not None}, '
-            f'scan_ranges={self.last_scan_count}, '
-            f'ultrasonic_count={len(self.last_ultrasonic)}'
-        )
-        self.status_pub.publish(status)
 
 
 def main(args=None):

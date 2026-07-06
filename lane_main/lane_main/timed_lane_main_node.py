@@ -17,11 +17,6 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Int16, Int16MultiArray
 
-# ============================================================================
-# 파라미터 기본값 - 튜닝은 대부분 여기서만 하면 된다.
-# (전부 ROS 파라미터로도 선언되므로 --ros-args -p 로 실행 중 덮어쓰기도 가능)
-# ============================================================================
-
 # 구독/발행 토픽
 LANE_OFFSET_TOPIC = '/lane_offset'
 MOTOR_CONTROL_TOPIC = '/motor_control'
@@ -40,14 +35,12 @@ class TimedLaneMainNode(Node):
     def __init__(self):
         super().__init__('timed_lane_main_node')
 
-        self.declare_parameter('lane_offset_topic', LANE_OFFSET_TOPIC)
-        self.declare_parameter('motor_control_topic', MOTOR_CONTROL_TOPIC)
         self.declare_parameter('steer_kp', STEER_KP)
         self.declare_parameter('base_speed', BASE_SPEED)
         self.declare_parameter('max_steer', MAX_STEER)
 
-        self.lane_offset_topic = self.get_parameter('lane_offset_topic').value
-        self.motor_control_topic = self.get_parameter('motor_control_topic').value
+        self.lane_offset_topic = LANE_OFFSET_TOPIC
+        self.motor_control_topic = MOTOR_CONTROL_TOPIC
         self.steer_kp = float(self.get_parameter('steer_kp').value)
         self.base_speed = int(self.get_parameter('base_speed').value)
         self.max_steer = int(self.get_parameter('max_steer').value)

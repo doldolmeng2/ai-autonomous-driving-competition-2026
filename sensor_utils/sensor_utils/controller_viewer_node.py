@@ -35,7 +35,7 @@ class ControllerViewerNode(Node):
 
     def draw(self):
         image = np.zeros((520, 760, 3), dtype=np.uint8)
-        self.put_text(image, 'Manual Controller /controller/joy', 24, 34, 0.75)
+        self.put_text(image, 'Controller /controller/joy', 24, 34, 0.75)
 
         if self.latest_msg is None:
             self.put_text(image, 'Waiting for controller topic...', 24, 82, 0.7)
