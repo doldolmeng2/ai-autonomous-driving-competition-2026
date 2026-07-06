@@ -25,17 +25,17 @@ DEFAULT_ABS_AXIS_ORDER = [0, 1, 2, 3, 4, 5, 16, 17]
 DEFAULT_BUTTON_BASE = 0x120
 
 
-class ManualControllerNode(Node):
+class ControllerNode(Node):
     """Read joystick or evdev controller input and publish sensor_msgs/Joy."""
 
     def __init__(self):
-        super().__init__('manual_controller_node')
+        super().__init__('controller_node')
 
         self.declare_parameter('device_path', 'auto')
         self.declare_parameter('device_type', 'auto')
         self.declare_parameter('publish_rate', 30.0)
         self.declare_parameter('deadzone', 0.05)
-        self.declare_parameter('topic_name', '/manual_controller/joy')
+        self.declare_parameter('topic_name', '/controller/joy')
         self.declare_parameter('event_axis_max', 32767.0)
 
         self.device_path = self.get_parameter('device_path').value
@@ -201,7 +201,7 @@ class ManualControllerNode(Node):
     def publish_joy(self):
         msg = Joy()
         msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = 'manual_controller'
+        msg.header.frame_id = 'controller'
         msg.axes = list(self.axes)
         msg.buttons = list(self.buttons)
         self.publisher.publish(msg)
@@ -223,7 +223,7 @@ class ManualControllerNode(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = ManualControllerNode()
+    node = ControllerNode()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

@@ -5,16 +5,16 @@ from pathlib import Path
 
 
 def generate_launch_description():
-    share = Path(get_package_share_directory('hardware'))
+    share = Path(get_package_share_directory('sensor_topic'))
     return LaunchDescription([
         Node(
-            package='hardware',
+            package='sensor_topic',
             executable='camera_node',
             output='screen',
             parameters=[str(share / 'config' / 'camera.yaml')],
         ),
         Node(
-            package='hardware',
+            package='sensor_utils',
             executable='camera_calibration_node',
             output='screen',
         ),

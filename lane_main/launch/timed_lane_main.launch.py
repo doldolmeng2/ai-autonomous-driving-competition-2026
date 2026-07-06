@@ -8,7 +8,7 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    hardware_share = Path(get_package_share_directory('hardware'))
+    sensor_topic_share = Path(get_package_share_directory('sensor_topic'))
 
     serial_port = LaunchConfiguration('serial_port')
 
@@ -19,10 +19,10 @@ def generate_launch_description():
             description='Arduino serial port. Use auto, /dev/ttyACM0, or /dev/ttyUSB0.',
         ),
         Node(
-            package='hardware',
+            package='sensor_topic',
             executable='camera_node',
             output='screen',
-            parameters=[str(hardware_share / 'config' / 'camera.yaml')],
+            parameters=[str(sensor_topic_share / 'config' / 'camera.yaml')],
         ),
         # 카메라(high) -> 오른쪽 차선 기준 offset 계산
         Node(

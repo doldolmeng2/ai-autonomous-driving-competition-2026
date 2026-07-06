@@ -6,14 +6,14 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    hardware_share = Path(get_package_share_directory('hardware'))
+    sensor_topic_share = Path(get_package_share_directory('sensor_topic'))
 
     return LaunchDescription([
         Node(
-            package='hardware',
+            package='sensor_topic',
             executable='camera_node',
             output='screen',
-            parameters=[str(hardware_share / 'config' / 'camera.yaml')],
+            parameters=[str(sensor_topic_share / 'config' / 'camera.yaml')],
         ),
         Node(
             package='lane_offset',

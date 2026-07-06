@@ -7,11 +7,11 @@ from pathlib import Path
 
 
 def generate_launch_description():
-    share = Path(get_package_share_directory('hardware'))
+    share = Path(get_package_share_directory('sensor_topic'))
     sllidar_share = Path(get_package_share_directory('sllidar_ros2'))
     return LaunchDescription([
         Node(
-            package='hardware',
+            package='sensor_topic',
             executable='camera_node',
             output='screen',
             parameters=[str(share / 'config' / 'camera.yaml')],
@@ -27,7 +27,7 @@ def generate_launch_description():
             }.items(),
         ),
         Node(
-            package='hardware',
+            package='sensor_topic',
             executable='ultrasonic_node',
             output='screen',
             parameters=[str(share / 'config' / 'ultrasonic.yaml')],

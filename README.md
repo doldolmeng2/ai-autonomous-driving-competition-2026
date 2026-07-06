@@ -14,7 +14,7 @@ source install/setup.bash
 특정 패키지만 빌드하려면:
 
 ```bash
-colcon build --symlink-install --packages-select hardware
+colcon build --symlink-install --packages-select sensor_topic sensor_utils
 source install/setup.bash
 ```
 
@@ -37,7 +37,7 @@ ros2 launch <패키지명> <launch파일명>
 예시:
 
 ```bash
-ros2 run hardware manual_controller_node
+ros2 run sensor_topic controller_node
 ros2 run drive_control drive_control_node
 ros2 launch drive_control controller_drive.launch.py
 ```
@@ -49,7 +49,7 @@ launch 파일을 수정했거나 새로 옮겼으면 다시 빌드 후 `source i
 센서 토픽 발행:
 
 ```bash
-ros2 launch hardware sensors.launch.py
+ros2 launch sensor_topic sensors.launch.py
 ```
 
 라이다만 단독 실행:
@@ -58,7 +58,7 @@ ros2 launch hardware sensors.launch.py
 ros2 launch sllidar_ros2 sllidar_a1_launch.py
 ```
 
-`hardware`의 센서 관련 launch는 내부에서 위 Slamtec A1 launch를 불러와 `/scan`을 발행한다.
+`sensor_topic`의 센서 관련 launch는 내부에서 위 Slamtec A1 launch를 불러와 `/scan`을 발행한다.
 
 발행 토픽:
 
@@ -80,7 +80,7 @@ ros2 launch sllidar_ros2 sllidar_a1_launch.py
 센서 시각화:
 
 ```bash
-ros2 launch hardware visualization.launch.py
+ros2 launch sensor_utils sensor_visualization.launch.py
 ```
 
 컨트롤러 수신기 토픽 발행 + 아두이노 모터 제어:
@@ -92,8 +92,8 @@ ros2 launch drive_control controller_drive.launch.py
 실행되는 노드:
 
 ```text
-hardware/manual_controller_node -> /manual_controller/joy 발행
-drive_control/drive_control_node -> /manual_controller/joy 구독 후 Arduino serial 송신
+sensor_topic/controller_node -> /controller/joy 발행
+drive_control/drive_control_node -> /controller/joy 구독 후 Arduino serial 송신
 ```
 
 아두이노 포트가 자동 탐색되지 않으면 직접 지정한다.
@@ -112,25 +112,25 @@ ros2 launch drive_control controller_drive.launch.py serial_port:=/dev/ttyACM0
 센서 발행과 rosbag 기록:
 
 ```bash
-ros2 launch hardware sensors_bag.launch.py
+ros2 launch sensor_utils sensors_bag.launch.py
 ```
 
 센서, 컨트롤러, rosbag 기록:
 
 ```bash
-ros2 launch hardware sensors_controller_bag.launch.py
+ros2 launch sensor_utils sensors_controller_bag.launch.py
 ```
 
 카메라 캘리브레이션 이미지 저장:
 
 ```bash
-ros2 launch hardware camera_calibration.launch.py
+ros2 launch sensor_utils camera_calibration.launch.py
 ```
 
 카메라 위치/각도 확인:
 
 ```bash
-ros2 launch hardware camera_pose_check.launch.py
+ros2 launch sensor_utils camera_pose_check.launch.py
 ```
 
 ## Device Notes
@@ -144,7 +144,7 @@ sudo usermod -aG dialout $USER
 그 다음 로그아웃/로그인 후 다시 실행한다. 로그아웃 전 현재 터미널에서 임시로 테스트하려면:
 
 ```bash
-sg dialout -c "ros2 launch hardware sensors.launch.py"
+sg dialout -c "ros2 launch sensor_topic sensors.launch.py"
 ```
 
 컨트롤러 수신기는 기본값으로 `/dev/input/js*`를 자동 탐색한다. 현재 테스트된 장치는:

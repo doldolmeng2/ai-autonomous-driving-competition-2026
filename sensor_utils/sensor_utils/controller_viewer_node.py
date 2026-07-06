@@ -12,8 +12,8 @@ class ControllerViewerNode(Node):
 
     def __init__(self):
         super().__init__('controller_viewer_node')
-        self.declare_parameter('joy_topic', '/manual_controller/joy')
-        self.declare_parameter('window_name', 'manual_controller')
+        self.declare_parameter('joy_topic', '/controller/joy')
+        self.declare_parameter('window_name', 'controller')
         self.declare_parameter('stale_timeout', 1.0)
 
         self.window_name = self.get_parameter('window_name').value
@@ -35,7 +35,7 @@ class ControllerViewerNode(Node):
 
     def draw(self):
         image = np.zeros((520, 760, 3), dtype=np.uint8)
-        self.put_text(image, 'Manual Controller /manual_controller/joy', 24, 34, 0.75)
+        self.put_text(image, 'Manual Controller /controller/joy', 24, 34, 0.75)
 
         if self.latest_msg is None:
             self.put_text(image, 'Waiting for controller topic...', 24, 82, 0.7)

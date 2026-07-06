@@ -1,0 +1,12 @@
+ultrasonic_node:
+  ros__parameters:
+    port: "auto"
+    baudrate: 115200
+    arduino_boot_delay: 2.0
+    debug_log_raw_line: true
+    sensor_names: ["1", "2", "3", "4", "5", "6"]
+    frame_prefix: "ultrasonic_"
+    field_of_view: 0.26
+    min_range: 0.02
+    max_range: 4.0
+    publish_timeout: 0.5

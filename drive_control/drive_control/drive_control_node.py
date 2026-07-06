@@ -31,7 +31,7 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Int16MultiArray
 
-from hardware.serial_port import open_serial
+from drive_control.serial_port import open_serial
 
 
 class DriveControlNode(Node):

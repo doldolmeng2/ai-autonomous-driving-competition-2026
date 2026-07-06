@@ -6,7 +6,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
 
-from hardware.serial_port import open_serial
+from drive_control.serial_port import open_serial
 
 
 SYNC_BYTE = 0xA5

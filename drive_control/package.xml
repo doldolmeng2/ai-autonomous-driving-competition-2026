@@ -8,8 +8,7 @@
   <license>TODO: License declaration</license>
 
   <depend>rclpy</depend>
-  <depend>sensor_msgs</depend>
-  <exec_depend>hardware</exec_depend>
+  <depend>std_msgs</depend>
   <exec_depend>python3-serial</exec_depend>
 
   <export>

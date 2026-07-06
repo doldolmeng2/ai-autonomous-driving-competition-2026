@@ -28,14 +28,14 @@ def choose_bag(bags):
 
 
 def generate_launch_description():
-    share = Path(get_package_share_directory('hardware'))
+    share = Path(get_package_share_directory('sensor_topic'))
     bags = find_bags(BAG_DIR)
 
     if not bags:
         return LaunchDescription([
             LogInfo(
                 msg=f'No rosbag found under BAG_DIR={BAG_DIR}. '
-                    'Set BAG_DIR in hardware/launch/bag_visualization.launch.py first.'
+                    'Set BAG_DIR in sensor_utils/launch/bag_visualization.launch.py first.'
             ),
         ])
 
@@ -47,13 +47,13 @@ def generate_launch_description():
             cmd=['ros2', 'bag', 'play', bag_path],
             output='screen',
         ),
-        Node(package='hardware', executable='camera_viewer_node', output='screen'),
-        Node(package='hardware', executable='lidar_viewer_node', output='screen'),
+        Node(package='sensor_utils', executable='camera_viewer_node', output='screen'),
+        Node(package='sensor_utils', executable='lidar_viewer_node', output='screen'),
         Node(
-            package='hardware',
+            package='sensor_utils',
             executable='ultrasonic_viewer_node',
             output='screen',
             parameters=[str(share / 'config' / 'ultrasonic.yaml')],
         ),
-        Node(package='hardware', executable='controller_viewer_node', output='screen'),
+        Node(package='sensor_utils', executable='controller_viewer_node', output='screen'),
     ])

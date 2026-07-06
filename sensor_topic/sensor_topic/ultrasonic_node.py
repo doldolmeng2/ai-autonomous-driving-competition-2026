@@ -7,7 +7,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import Range
 from std_msgs.msg import Float32MultiArray
 
-from hardware.serial_port import open_serial
+from drive_control.serial_port import open_serial
 
 
 class UltrasonicNode(Node):

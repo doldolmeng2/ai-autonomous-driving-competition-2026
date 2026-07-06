@@ -1,5 +1,5 @@
 from launch import LaunchDescription
-from launch.actions import ExecuteProcess, IncludeLaunchDescription
+from launch.actions import IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
@@ -7,11 +7,11 @@ from pathlib import Path
 
 
 def generate_launch_description():
-    share = Path(get_package_share_directory('hardware'))
+    share = Path(get_package_share_directory('sensor_topic'))
     sllidar_share = Path(get_package_share_directory('sllidar_ros2'))
     return LaunchDescription([
         Node(
-            package='hardware',
+            package='sensor_topic',
             executable='camera_node',
             output='screen',
             parameters=[str(share / 'config' / 'camera.yaml')],
@@ -27,19 +27,15 @@ def generate_launch_description():
             }.items(),
         ),
         Node(
-            package='hardware',
+            package='sensor_topic',
             executable='ultrasonic_node',
             output='screen',
             parameters=[str(share / 'config' / 'ultrasonic.yaml')],
         ),
         Node(
-            package='hardware',
-            executable='manual_controller_node',
+            package='sensor_topic',
+            executable='controller_node',
             output='screen',
-            parameters=[str(share / 'config' / 'manual_controller.yaml')],
-        ),
-        ExecuteProcess(
-            cmd=['ros2', 'bag', 'record', '-a'],
-            output='screen',
+            parameters=[str(share / 'config' / 'controller.yaml')],
         ),
     ])

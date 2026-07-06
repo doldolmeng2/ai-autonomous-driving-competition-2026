@@ -8,7 +8,7 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    hardware_share = Path(get_package_share_directory('hardware'))
+    sensor_topic_share = Path(get_package_share_directory('sensor_topic'))
 
     serial_port = LaunchConfiguration('serial_port')
 
@@ -19,18 +19,18 @@ def generate_launch_description():
             description='Arduino serial port. Use auto, /dev/ttyACM0, or /dev/ttyUSB0.',
         ),
         Node(
-            package='hardware',
-            executable='manual_controller_node',
+            package='sensor_topic',
+            executable='controller_node',
             output='screen',
-            parameters=[str(hardware_share / 'config' / 'manual_controller.yaml')],
+            parameters=[str(sensor_topic_share / 'config' / 'controller.yaml')],
         ),
         # 조이스틱(Joy) -> 공통 제어 토픽(/motor_control) 변환
         Node(
-            package='hardware',
+            package='sensor_utils',
             executable='joy_to_motor_node',
             output='screen',
             parameters=[{
-                'joy_topic': '/manual_controller/joy',
+                'joy_topic': '/controller/joy',
                 'motor_control_topic': '/motor_control',
                 'steer_axis': 3,
                 'drive_axis': 1,

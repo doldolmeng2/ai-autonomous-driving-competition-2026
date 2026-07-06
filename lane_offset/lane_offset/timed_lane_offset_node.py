@@ -493,7 +493,7 @@ class TimedLaneOffsetNode(Node):
         return msg
 
     # ======================================================================
-    # YUYV -> BGR 변환 (hardware/camera_viewer_node.py 와 동일한 방식)
+    # YUYV -> BGR 변환 (sensor_utils/camera_viewer_node.py 와 동일한 방식)
     # ======================================================================
     def to_bgr(self, msg):
         data = np.frombuffer(msg.data, dtype=np.uint8)

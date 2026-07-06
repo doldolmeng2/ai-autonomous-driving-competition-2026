@@ -3,7 +3,7 @@
   미래차 경진대회 - 초음파 센서 6개 송신 코드
   ==========================================================
 
-  ROS2 hardware/ultrasonic_node.py와 맞는 Serial 출력 형식:
+  ROS2 sensor_topic/ultrasonic_node.py와 맞는 Serial 출력 형식:
 
     "거리1,거리2,거리3,거리4,거리5,거리6\n"
 

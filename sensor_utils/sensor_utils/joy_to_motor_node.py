@@ -8,13 +8,13 @@
 설계 배경(PDF 기준):
     - /motor_control 은 조이스틱과 자율주행 알고리즘이 공통으로 사용하는
       제어 토픽이다. drive_control 노드는 이 토픽만 구독한다.
-    - 조이스틱/컨트롤러 관련 토픽 발행은 hardware 패키지의 역할이므로,
-      Joy -> /motor_control 변환도 hardware 패키지에 둔다.
-    - manual_controller_node 의 원본 Joy 발행은 시각화(controller_viewer_node)
+    - 조이스틱/컨트롤러 원본 토픽 발행은 sensor_topic 패키지의 역할이고,
+      Joy -> /motor_control 변환은 sensor_utils 패키지에서 담당한다.
+    - controller_node 의 원본 Joy 발행은 시각화(controller_viewer_node)
       용으로 그대로 유지하고, 이 노드가 그 위에서 변환만 담당한다.
 
 동작:
-    manual_controller_node 는 일정 주기(publish_rate)로 Joy 를 계속 발행하므로,
+    controller_node 는 일정 주기(publish_rate)로 Joy 를 계속 발행하므로,
     이 노드는 Joy 콜백마다 /motor_control 을 발행한다. 따라서 스틱을 가만히
     쥐고 있어도 명령이 꾸준히 나가고, drive_control 의 input_timeout 안전정지와
     충돌하지 않는다.
@@ -38,9 +38,9 @@ class JoyToMotorNode(Node):
         super().__init__('joy_to_motor_node')
 
         # ---- 파라미터 -----------------------------------------------------
-        self.declare_parameter('joy_topic', '/manual_controller/joy')
+        self.declare_parameter('joy_topic', '/controller/joy')
         self.declare_parameter('motor_control_topic', '/motor_control')
-        # 어떤 조이스틱 축을 조향/구동으로 쓸지 (manual_controller 축 순서 기준)
+        # 어떤 조이스틱 축을 조향/구동으로 쓸지 (controller 축 순서 기준)
         self.declare_parameter('steer_axis', 3)
         self.declare_parameter('drive_axis', 1)
         # 축 방향이 반대로 느껴지면 True 로 뒤집는다

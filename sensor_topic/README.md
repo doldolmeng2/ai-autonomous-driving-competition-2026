@@ -1,4 +1,4 @@
-# hardware package
+# sensor_topic package
 
 ## Topic flow
 
@@ -7,7 +7,7 @@
 | `camera_node` | - | `/camera/high/image_raw` `sensor_msgs/Image`, `/camera/high/camera_info` `sensor_msgs/CameraInfo`, `/camera/low/image_raw` `sensor_msgs/Image`, `/camera/low/camera_info` `sensor_msgs/CameraInfo` |
 | `sllidar_node` | - | `/scan` `sensor_msgs/LaserScan` |
 | `ultrasonic_node` | - | `/ultrasonic/range_1` ... `/ultrasonic/range_6` `sensor_msgs/Range`, `/ultrasonic/ranges` `std_msgs/Float32MultiArray` |
-| `manual_controller_node` | - | `/manual_controller/joy` `sensor_msgs/Joy` |
+| `controller_node` | - | `/controller/joy` `sensor_msgs/Joy` |
 | `camera_viewer_node` | `/camera/high/image_raw` `sensor_msgs/Image`, `/camera/low/image_raw` `sensor_msgs/Image` | OpenCV windows |
 | `lidar_viewer_node` | `/scan` `sensor_msgs/LaserScan` | OpenCV radar window |
 | `ultrasonic_viewer_node` | `/ultrasonic/*/range` `sensor_msgs/Range` | OpenCV range window |
@@ -15,7 +15,7 @@
 Manual driving should normally flow as:
 
 ```text
-USB controller -> manual_controller_node -> /manual_controller/joy
+USB controller -> controller_node -> /controller/joy
 -> drive_control node -> Arduino -> motor driver
 ```
 
@@ -58,7 +58,7 @@ Run the Slamtec A1 lidar directly with:
 ros2 launch sllidar_ros2 sllidar_a1_launch.py
 ```
 
-The `hardware` sensor launch files include that same Slamtec launch.
+The `sensor_topic` sensor launch files include that same Slamtec launch.
 
 For a temporary test without logging out, run:
 

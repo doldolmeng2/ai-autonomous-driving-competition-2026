@@ -7,11 +7,11 @@ from pathlib import Path
 
 
 def generate_launch_description():
-    share = Path(get_package_share_directory('hardware'))
+    share = Path(get_package_share_directory('sensor_topic'))
     sllidar_share = Path(get_package_share_directory('sllidar_ros2'))
     return LaunchDescription([
         Node(
-            package='hardware',
+            package='sensor_topic',
             executable='camera_node',
             output='screen',
             parameters=[str(share / 'config' / 'camera.yaml')],
@@ -27,24 +27,24 @@ def generate_launch_description():
             }.items(),
         ),
         Node(
-            package='hardware',
-            executable='manual_controller_node',
+            package='sensor_topic',
+            executable='controller_node',
             output='screen',
-            parameters=[str(share / 'config' / 'manual_controller.yaml')],
+            parameters=[str(share / 'config' / 'controller.yaml')],
         ),
-        Node(package='hardware', executable='camera_viewer_node', output='screen'),
-        Node(package='hardware', executable='lidar_viewer_node', output='screen'),
+        Node(package='sensor_utils', executable='camera_viewer_node', output='screen'),
+        Node(package='sensor_utils', executable='lidar_viewer_node', output='screen'),
         Node(
-            package='hardware',
+            package='sensor_topic',
             executable='ultrasonic_node',
             output='screen',
             parameters=[str(share / 'config' / 'ultrasonic.yaml')],
         ),
         Node(
-            package='hardware',
+            package='sensor_utils',
             executable='ultrasonic_viewer_node',
             output='screen',
             parameters=[str(share / 'config' / 'ultrasonic.yaml')],
         ),
-        Node(package='hardware', executable='controller_viewer_node', output='screen'),
+        Node(package='sensor_utils', executable='controller_viewer_node', output='screen'),
     ])

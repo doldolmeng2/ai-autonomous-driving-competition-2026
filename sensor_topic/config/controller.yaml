@@ -1,8 +1,8 @@
-manual_controller_node:
+controller_node:
   ros__parameters:
     device_path: "auto"
     device_type: "js"
     publish_rate: 30.0
     deadzone: 0.05
-    topic_name: "/manual_controller/joy"
+    topic_name: "/controller/joy"
     event_axis_max: 32767.0
