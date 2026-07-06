@@ -11,8 +11,8 @@
 | `hsv_tuner_node` | camera image topic | OpenCV HSV tuner |
 | `lidar_viewer_node` | `/scan` | OpenCV radar window |
 | `ultrasonic_viewer_node` | `/ultrasonic/range_1` ... `/ultrasonic/range_6` | OpenCV range window |
-| `controller_viewer_node` | `/controller/joy` | OpenCV controller window |
-| `joy_to_motor_node` | `/controller/joy` | `/motor_control` |
+| `controller_viewer_node` | `/manual_controller/joy` | OpenCV controller window |
+| `joy_to_motor_node` | `/manual_controller/joy` | `/motor_control` |
 
 Useful launches:
 

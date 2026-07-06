@@ -31,7 +31,7 @@ from sensor_msgs.msg import Joy
 from std_msgs.msg import Int16MultiArray
 
 
-JOY_TOPIC = '/controller/joy'
+JOY_TOPIC = '/manual_controller/joy'
 MOTOR_CONTROL_TOPIC = '/motor_control'
 STEER_AXIS = 3
 DRIVE_AXIS = 1

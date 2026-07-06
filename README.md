@@ -23,7 +23,7 @@ sensor_topic/camera_node -> /camera/high/image_raw
 sensor_topic/camera_node -> /camera/low/image_raw
 sensor_topic/ultrasonic_node -> /ultrasonic/range_1 ... /ultrasonic/range_6
 sllidar_ros2 -> /scan
-sensor_topic/controller_node -> /controller/joy
+sensor_topic/controller_node -> /manual_controller/joy
 ```
 
 Timed lane driving:
@@ -61,7 +61,7 @@ Parking:
 Controller drive:
 
 ```text
-/controller/joy
+/manual_controller/joy
 -> sensor_utils/joy_to_motor_node
 -> /motor_control
 -> drive_control/drive_control_node
@@ -120,7 +120,7 @@ ros2 launch sensor_utils bag_visualization.launch.py
 | `/camera/low/camera_info` | `sensor_msgs/CameraInfo` |
 | `/scan` | `sensor_msgs/LaserScan` |
 | `/ultrasonic/range_1` ... `/ultrasonic/range_6` | `sensor_msgs/Range` |
-| `/controller/joy` | `sensor_msgs/Joy` |
+| `/manual_controller/joy` | `sensor_msgs/Joy` |
 | `/lane_info` | `std_msgs/Int16` |
 | `/lane_offset` | `std_msgs/Int16` |
 | `/motor_control` | `std_msgs/Int16MultiArray` |

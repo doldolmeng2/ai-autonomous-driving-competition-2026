@@ -35,7 +35,7 @@ class ControllerNode(Node):
         self.declare_parameter('device_type', 'auto')
         self.declare_parameter('publish_rate', 30.0)
         self.declare_parameter('deadzone', 0.05)
-        self.declare_parameter('topic_name', '/controller/joy')
+        self.declare_parameter('topic_name', '/manual_controller/joy')
         self.declare_parameter('event_axis_max', 32767.0)
 
         self.device_path = self.get_parameter('device_path').value
