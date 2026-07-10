@@ -44,13 +44,21 @@
 곡선 대응:
     - 슬라이딩 윈도우로 아래에서 위로 올라가며 차선 위치를 추적하고,
       수집한 픽셀에 2차 다항식을 피팅해 곡선 구간에서도 차선을 놓치지 않게 한다.
-    - 윈도우 한 단은 높이가 짧아 모양 필터가 잘 안 통하므로, 대신 윈도우 폭을
-      좁게 잡고 윈도우 안에 여러 덩어리가 있으면 지금 추적 중인 x와 가장 가까운
-      덩어리만 사용해 옆에 있는 꽃 그림 등이 평균에 섞이지 않게 한다.
+    - 윈도우 한 단은 높이가 짧아 모양 필터가 잘 안 통하고, 근접 밴드에서 쓰는
+      "이미지 오른쪽/양옆" 방향 기준 색 검사도 급커브에서는 깨진다(차선의 로컬
+      방향이 카메라 좌/우 축과 어긋나기 때문). 그래서 방향 가정이 없는 패치
+      (부분공간) 기반 검사를 쓴다: 각 윈도우 단의 모든 컬럼 x에 대해 그 x를
+      중심으로 한 정사각 패치(patch_width_px)를 만들고, 그 안의 흰색/초록/회색
+      비율만으로 "이 패치가 lane_kind 경계선 조각인가"를 판정한다
+      (오른쪽=초록+회색 혼합, 왼쪽=회색). 패치가 등방적이라 차선이 어느 각도로
+      놓여도 그대로 적용되고, 여러 패치가 조건을 만족하면 이전 단의 x_current에서
+      window_max_step_px 이내로 가장 가까운 것만 이어붙인다(연속성 제약). 조건을
+      만족하는 패치가 하나도 없으면 그 단은 건너뛰고 이전 위치를 유지한다.
 """
 
 import numpy as np
 import rclpy
+from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image
@@ -111,14 +119,50 @@ TARGET_OFFSET_PX = 195
 # 타당하다. bag의 left 토픽을 camera_high로 remap해 측정한 값이라 실제
 # camera_high 하드웨어로 재측정하면 미세 조정이 필요할 수 있음.
 LEFT_TARGET_OFFSET_PX = -212
-# 한 프레임 사이 offset이 이 값(px)보다 더 튀면 오검출로 보고 이전 값 유지
-MAX_OFFSET_JUMP_PX = 150
+# 한 프레임 사이 offset이 이 값(px)보다 더 튀면 오검출로 보고 이전 값 유지.
+# None으로 두면 점프 검사 자체를 꺼서(제한 없음) 항상 이번 프레임 값을 그대로 씀.
+MAX_OFFSET_JUMP_PX = None
 
 # ---- 슬라이딩 윈도우(곡선 추적) -------------------------------------------
 # 범위를 좁게 잡아서 옆에 있는 꽃 그림 등을 덜 건드리게 함.
 NUM_WINDOWS = 7      # ROI를 세로로 나누는 윈도우 개수(아래->위로 순차 추적)
 WINDOW_MARGIN = 27   # 윈도우 폭의 절반(px): 실제 폭은 x_current 기준 좌우 margin*2
 WINDOW_MINPIX = 50   # 윈도우 안에서 이 픽셀 수 이상 모여야 x_current를 갱신
+
+# ---- 근접 밴드 기준선 판정용 색상 스트립(green_backed/road_flanked) ---------
+# find_lane_bases(근접 밴드, 차선이 거의 수직이라 좌/우 방향 가정이 유효한
+# 구간)에서만 쓰는 방향 기준 색 검사. 슬라이딩 윈도우 곡선 추적에는 쓰지
+# 않는다(아래 패치 기반 검사 참고).
+GREEN_BACKED_RATIO_MIN = 0.30   # 오른쪽 판정: 덩어리 바로 오른쪽 초록 비율 임계값
+ROAD_FLANKED_RATIO_MIN = 0.40   # 왼쪽 판정: 덩어리 양옆 회색 도로 비율 임계값
+COLOR_CHECK_NEAR_PX = 10        # 색 비교 스트립 시작 위치(덩어리 경계에서부터)
+COLOR_CHECK_FAR_PX = 40         # 색 비교 스트립 끝 위치(덩어리 경계에서부터)
+
+# ---- 패치(부분공간) 기반 경계선 인식 + 연속성 제약(곡선 대응) ----------------
+# 방향(이미지 좌/우) 가정 없이, 작은 정사각형 패치 하나하나에 대해 "그 안에
+# 초록/회색/흰색이 각각 일정 비율 이상 섞여 있는가"만으로 경계선 조각인지
+# 판정한다. 오른쪽 차선(실선)은 초록-회색 경계 위에 있으므로 패치 안에
+# 초록+회색이 모두 일정 비율 이상 있으면 인정하고, 왼쪽 차선(점선)은 양옆이
+# 모두 회색이므로 회색 비율만 본다. 방향을 안 따지기 때문에 차선이 급커브로
+# 휘어 로컬 방향이 수평에 가까워져도 깨지지 않는다.
+# 패치들을 연결할 때도 "이전 단에서 얼마나 떨어졌는지"(연속성)만 보고,
+# 좌/우 전역 분리는 하지 않는다.
+PATCH_WIDTH_PX = 30          # 패치 폭(px). 높이는 슬라이딩 윈도우 한 단의 높이를 그대로 씀
+MIN_PATCH_WHITE_RATIO = 0.05  # 패치 안에 흰색(차선 픽셀)이 최소 이만큼은 있어야 후보로 인정
+# 패치 전용 초록/회색 비율 임계값. 근접 밴드의 GREEN_BACKED_RATIO_MIN(0.30)/
+# ROAD_FLANKED_RATIO_MIN(0.40)을 그대로 재사용하면 안 된다: 그 값들은 "차선
+# 경계에서 떨어진 순수 초록/회색 스트립"을 보는 기준이라 초록+회색 합이
+# 0.70을 넘어야 하는데, 패치 방식은 흰 차선 자체가 패치 폭 일부를 차지하고
+# 있어서(polyfit 실험 결과 경계 부근 흰색 비율이 최대 ~0.35~0.4까지 남음)
+# 초록+회색+흰색 합이 1이 되는 한 두 임계값의 합이 0.70을 넘으면 경계 부근
+# 어떤 컬럼에서도 동시에 만족시킬 수 없다. 그래서 패치용은 합이 충분히
+# 작은 값으로 따로 둔다.
+PATCH_GREEN_RATIO_MIN = 0.15  # 오른쪽 판정(패치): 패치 안 초록 비율 임계값
+PATCH_ROAD_RATIO_MIN = 0.15   # 왼쪽/오른쪽 판정(패치): 패치 안 회색 도로 비율 임계값
+# 연속성 제약: 이전 윈도우의 x_current 대비 이 거리(px)보다 멀리 떨어진
+# 패치는(색이 맞아도) 후보에서 제외한다. 급커브 안쪽의 반대쪽 차선처럼
+# 색 조건은 우연히 맞아도 물리적으로 이어질 수 없는 패치를 걸러낸다.
+WINDOW_MAX_STEP_PX = 40
 
 # ---- 모양 필터(near-field 차선 시작점 탐색용) ------------------------------
 # 초록 매트 위 흰 꽃 그림 등은 색은 흰색이지만 작고 동글동글한 덩어리다.
@@ -131,12 +175,18 @@ WINDOW_MINPIX = 50   # 윈도우 안에서 이 픽셀 수 이상 모여야 x_cur
 NEAR_FIELD_FULL_HEIGHT_RATIO = 0.8  # span 기준: 밴드 높이 대비 덩어리 높이 비율 임계값
 MIN_LINE_ASPECT_RATIO = 1.5         # aspect 기준: 세로/가로 비율 임계값
 MIN_LINE_HEIGHT_PX = 20             # aspect 기준: 최소 세로 길이(px)
+# 도로 이음새/실금처럼 실제 차선보다 훨씬 가느다란 흰 줄을 걸러내기 위한
+# 최소 평균 폭(px). bbox width 대신 area/height(=평균 두께)를 쓴다 - 근접
+# 밴드 안에서 살짝 대각선으로 지나가는 덩어리는 bbox 폭이 실제 두께보다
+# 커져서, bbox 폭만 보면 얇은 실금도 통과할 수 있기 때문이다.
+MIN_LINE_AVG_WIDTH_PX = 4
 
 # ---- 디버그 시각화 --------------------------------------------------------
 # ROI/차선/슬라이딩 윈도우를 그린 화면을 바로 OpenCV 창으로 띄운다.
 # (bag/카메라 토픽만 켜져 있으면, 이 노드 실행만으로 인식 화면이 뜬다.)
 # 실차 대회 주행 시에는 CPU 절약을 위해 False로 끄는 것을 권장.
 DEBUG_VIEW = True
+PUBLISH_DEBUG_IMAGE = False  # True로 켜면 OpenCV 창 없이도 디버그 이미지를 토픽으로 발행
 WINDOW_NAME = 'timed_lane_offset_debug'          # OpenCV 디버그 창 이름
 DEBUG_IMAGE_TOPIC = '/lane_offset/debug_image'    # 디버그 이미지를 토픽으로도 발행할 때 쓰는 토픽명
 
@@ -169,16 +219,33 @@ class TimedLaneOffsetNode(Node):
         self.declare_parameter('white_overload_ratio', WHITE_OVERLOAD_RATIO)
         self.declare_parameter('target_offset_px', TARGET_OFFSET_PX)
         self.declare_parameter('left_target_offset_px', LEFT_TARGET_OFFSET_PX)
-        self.declare_parameter('max_offset_jump_px', MAX_OFFSET_JUMP_PX)
+        # dynamic_typing=True: MAX_OFFSET_JUMP_PX(또는 이 파라미터 오버라이드)가
+        # None이어도(점프 검사 끔) 타입 에러 없이 선언할 수 있게 함.
+        self.declare_parameter(
+            'max_offset_jump_px',
+            MAX_OFFSET_JUMP_PX,
+            descriptor=ParameterDescriptor(dynamic_typing=True),
+        )
         self.declare_parameter('num_windows', NUM_WINDOWS)
         self.declare_parameter('window_margin', WINDOW_MARGIN)
         self.declare_parameter('window_minpix', WINDOW_MINPIX)
+        self.declare_parameter('green_backed_ratio_min', GREEN_BACKED_RATIO_MIN)
+        self.declare_parameter('road_flanked_ratio_min', ROAD_FLANKED_RATIO_MIN)
+        self.declare_parameter('color_check_near_px', COLOR_CHECK_NEAR_PX)
+        self.declare_parameter('color_check_far_px', COLOR_CHECK_FAR_PX)
+        self.declare_parameter('patch_width_px', PATCH_WIDTH_PX)
+        self.declare_parameter('min_patch_white_ratio', MIN_PATCH_WHITE_RATIO)
+        self.declare_parameter('patch_green_ratio_min', PATCH_GREEN_RATIO_MIN)
+        self.declare_parameter('patch_road_ratio_min', PATCH_ROAD_RATIO_MIN)
+        self.declare_parameter('window_max_step_px', WINDOW_MAX_STEP_PX)
         self.declare_parameter(
             'near_field_full_height_ratio', NEAR_FIELD_FULL_HEIGHT_RATIO
         )
         self.declare_parameter('min_line_aspect_ratio', MIN_LINE_ASPECT_RATIO)
         self.declare_parameter('min_line_height_px', MIN_LINE_HEIGHT_PX)
+        self.declare_parameter('min_line_avg_width_px', MIN_LINE_AVG_WIDTH_PX)
         self.declare_parameter('debug_view', DEBUG_VIEW)
+        self.declare_parameter('publish_debug_image', PUBLISH_DEBUG_IMAGE)
 
         self.image_topic = IMAGE_TOPIC
         self.lane_offset_topic = LANE_OFFSET_TOPIC
@@ -212,12 +279,32 @@ class TimedLaneOffsetNode(Node):
         self.left_target_offset_px = int(
             self.get_parameter('left_target_offset_px').value
         )
-        self.max_offset_jump_px = int(
-            self.get_parameter('max_offset_jump_px').value
+        _max_offset_jump_px = self.get_parameter('max_offset_jump_px').value
+        self.max_offset_jump_px = (
+            None if _max_offset_jump_px is None else int(_max_offset_jump_px)
         )
         self.num_windows = int(self.get_parameter('num_windows').value)
         self.window_margin = int(self.get_parameter('window_margin').value)
         self.window_minpix = int(self.get_parameter('window_minpix').value)
+        self.green_backed_ratio_min = float(
+            self.get_parameter('green_backed_ratio_min').value
+        )
+        self.road_flanked_ratio_min = float(
+            self.get_parameter('road_flanked_ratio_min').value
+        )
+        self.color_check_near_px = int(self.get_parameter('color_check_near_px').value)
+        self.color_check_far_px = int(self.get_parameter('color_check_far_px').value)
+        self.patch_width_px = int(self.get_parameter('patch_width_px').value)
+        self.min_patch_white_ratio = float(
+            self.get_parameter('min_patch_white_ratio').value
+        )
+        self.patch_green_ratio_min = float(
+            self.get_parameter('patch_green_ratio_min').value
+        )
+        self.patch_road_ratio_min = float(
+            self.get_parameter('patch_road_ratio_min').value
+        )
+        self.window_max_step_px = int(self.get_parameter('window_max_step_px').value)
         self.near_field_full_height_ratio = float(
             self.get_parameter('near_field_full_height_ratio').value
         )
@@ -225,13 +312,25 @@ class TimedLaneOffsetNode(Node):
             self.get_parameter('min_line_aspect_ratio').value
         )
         self.min_line_height_px = int(self.get_parameter('min_line_height_px').value)
+        self.min_line_avg_width_px = float(
+            self.get_parameter('min_line_avg_width_px').value
+        )
         self.debug_view = bool(self.get_parameter('debug_view').value)
         self.window_name = WINDOW_NAME
-        self.publish_debug_image = False
+        self.publish_debug_image = bool(
+            self.get_parameter('publish_debug_image').value
+        )
         self.debug_image_topic = DEBUG_IMAGE_TOPIC
 
         # 마지막으로 발행한(유효했던) offset. 오검출 프레임에서는 이 값을 그대로 재사용.
         self.last_offset = 0
+        # 근접 밴드에서 마지막으로 채택한 오른쪽/왼쪽 기준점 x좌표. 후보가 여럿일 때
+        # "가장 오른쪽"이 아니라 "이전 프레임과 가장 가까운 것"을 고르는 연속성
+        # 기준으로 쓴다(도로 위 실금 등 노이즈가 필터를 뚫고 들어와도 프레임마다
+        # 다른 걸 골라 값이 튀는 것을 막기 위함). 탐지가 안 된 프레임에는 갱신하지
+        # 않고 유지해서, 점선처럼 잠깐 끊기는 경우에도 연속성이 이어지게 한다.
+        self.prev_right_x = None
+        self.prev_left_x = None
 
         qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -299,7 +398,7 @@ class TimedLaneOffsetNode(Node):
 
         if right_x is not None:
             line_x_r, windows_r, px_r, py_r = self.track_line_with_sliding_window(
-                white_mask, right_x
+                white_mask, green_mask, road_mask, right_x, 'right'
             )
             offsets.append((line_x_r - center_x) - self.target_offset_px)
             base_points.append(right_x)
@@ -309,7 +408,7 @@ class TimedLaneOffsetNode(Node):
 
         if left_x is not None:
             line_x_l, windows_l, px_l, py_l = self.track_line_with_sliding_window(
-                white_mask, left_x
+                white_mask, green_mask, road_mask, left_x, 'left'
             )
             offsets.append((line_x_l - center_x) - self.left_target_offset_px)
             base_points.append(left_x)
@@ -325,8 +424,13 @@ class TimedLaneOffsetNode(Node):
         else:
             mode = 'left'
 
-        if abs(lane_offset - self.last_offset) > self.max_offset_jump_px:
+        jump_too_large = (
+            self.max_offset_jump_px is not None
+            and abs(lane_offset - self.last_offset) > self.max_offset_jump_px
+        )
+        if jump_too_large:
             # 한 프레임 만에 비정상적으로 튀면 오검출로 보고 이전 값 유지
+            # (max_offset_jump_px가 None이면 이 검사 자체를 건너뛴다)
             self.get_logger().warn(
                 f'Offset jump too large ({self.last_offset} -> {lane_offset}), '
                 'holding last offset',
@@ -389,10 +493,18 @@ class TimedLaneOffsetNode(Node):
     # ======================================================================
     # 모양 필터: 차선(세로로 길고 가로로 짧음) vs 꽃 그림 등 (동글동글한 덩어리)
     # ======================================================================
-    def find_lane_shaped_components(self, mask, min_height, min_aspect_ratio, full_height_ratio):
+    def find_lane_shaped_components(
+        self, mask, min_height, min_aspect_ratio, full_height_ratio, min_avg_width
+    ):
         """mask에서 차선처럼 생긴 픽셀 뭉치만 골라 (x, y, w, h, label) bbox 리스트로 반환.
 
-        아래 둘 중 하나를 만족해야 통과:
+        먼저 평균 폭(area/h, 두께 근사치)이 min_avg_width 이상이어야 한다.
+        도로 이음새/실금처럼 실제 차선보다 훨씬 가느다란 흰 줄을 걸러내기 위함.
+        bbox 폭(w) 대신 area/h를 쓰는 이유: 근접 밴드 안에서 살짝 대각선으로
+        지나가는 덩어리는 bbox 폭이 실제 두께보다 커지므로, bbox 폭만 보면
+        얇은 실금도 통과할 수 있다.
+
+        그다음 아래 둘 중 하나를 만족해야 통과:
           - span: 높이가 mask 전체 높이의 full_height_ratio 이상
             (곡선에서 실선이 옆으로 휘어 폭이 넓어져도, 밴드를 처음부터
             끝까지 관통하는 건 변하지 않는다)
@@ -406,14 +518,111 @@ class TimedLaneOffsetNode(Node):
         num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
         boxes = []
         for label in range(1, num_labels):  # label 0 = 배경
-            x, y, w, h, _area = stats[label]
+            x, y, w, h, area = stats[label]
             if w <= 0 or h <= 0:
+                continue
+            avg_width = area / float(h)
+            if avg_width < min_avg_width:
                 continue
             spans_band = h >= full_height_threshold
             is_tall_narrow = h >= min_height and (h / float(w)) >= min_aspect_ratio
             if spans_band or is_tall_narrow:
                 boxes.append((x, y, w, h, label))
         return boxes, labels
+
+    # ======================================================================
+    # 색상 일관성 체크 (근접 밴드 전용 - 방향 기준)
+    # ======================================================================
+    def check_color_consistency(self, green_band, road_band, left_edge, right_edge, lane_kind):
+        """덩어리(left_edge~right_edge, band 로컬 x좌표)가 lane_kind 특징에 맞는지 검사.
+
+        - lane_kind == 'right': 덩어리 바로 오른쪽이 초록 매트인가(green_backed)
+        - lane_kind == 'left' : 덩어리 양옆이 회색 도로인가(road_flanked)
+
+        근접 밴드(find_lane_bases)는 차량 바로 앞이라 차선이 거의 수직에
+        가까우므로 "이미지 오른쪽/양옆"이라는 방향 기준이 유효하다. 슬라이딩
+        윈도우 곡선 추적에는 이 방식 대신 방향 가정이 없는 패치 기반 검사
+        (compute_patch_ratio_profile / patch_is_lane_boundary)를 쓴다.
+
+        green_band/road_band는 검사 대상과 같은 y범위(행)를 공유하는 마스크여야 한다.
+        """
+        width = (green_band if green_band is not None else road_band).shape[1]
+        near = self.color_check_near_px
+        far = self.color_check_far_px
+
+        if lane_kind == 'right':
+            rx0 = min(right_edge + near, width - 1)
+            rx1 = min(right_edge + far, width)
+            if rx1 <= rx0:
+                return False
+            strip = green_band[:, rx0:rx1]
+            green_ratio = float((strip > 0).mean()) if strip.size else 0.0
+            return green_ratio > self.green_backed_ratio_min
+
+        rx0 = min(right_edge + near, width - 1)
+        rx1 = min(right_edge + far, width)
+        lx0 = max(left_edge - far, 0)
+        lx1 = max(left_edge - near, 0)
+        left_ratio = 0.0
+        if lx1 > lx0:
+            strip = road_band[:, lx0:lx1]
+            left_ratio = float((strip > 0).mean()) if strip.size else 0.0
+        right_ratio = 0.0
+        if rx1 > rx0:
+            strip = road_band[:, rx0:rx1]
+            right_ratio = float((strip > 0).mean()) if strip.size else 0.0
+        return left_ratio > self.road_flanked_ratio_min and right_ratio > self.road_flanked_ratio_min
+
+    # ======================================================================
+    # 패치(부분공간) 기반 경계선 인식 (슬라이딩 윈도우 곡선 추적 전용 - 방향 무관)
+    # ======================================================================
+    def compute_patch_ratio_profile(self, band_mask):
+        """band_mask의 각 컬럼 x를 중심으로 patch_width_px 폭 패치의 on-비율 프로파일을 반환.
+
+        patch_width_px x band_mask.shape[0] 크기 정사각형에 가까운 패치를 한 칸씩
+        옆으로 밀면서(컬럼마다) 그 안의 on-픽셀 비율을 계산한다. 좌/우를 구분하지
+        않는 등방적(isotropic) 검사라서, 차선이 어느 각도로 놓여 있어도(급커브로
+        로컬 방향이 수평에 가까워져도) 그대로 적용된다.
+        """
+        height, width = band_mask.shape
+        binary = (band_mask > 0).astype(np.float32)
+        col_sum = binary.sum(axis=0)
+        cumsum = np.concatenate(([0.0], np.cumsum(col_sum)))
+        half = self.patch_width_px // 2
+        xs = np.arange(width)
+        x0 = np.clip(xs - half, 0, width)
+        x1 = np.clip(xs + half + 1, 0, width)
+        areas = (x1 - x0) * height
+        sums = cumsum[x1] - cumsum[x0]
+        return np.divide(sums, areas, out=np.zeros_like(sums), where=areas > 0)
+
+    def patch_is_lane_boundary(self, white_ratio, green_ratio, road_ratio, lane_kind):
+        """컬럼(패치)이 lane_kind 경계선 조각인지, 색 혼합 비율만으로 판정.
+
+        스칼라와 numpy 배열(컬럼별 프로파일 전체) 양쪽 다 그대로 넣을 수 있게
+        비교 연산(& / >)만 사용한다(and/or, 조기 return 금지 - 배열이면 진리값이
+        모호해져 에러가 난다).
+
+        - 흰색(차선 픽셀) 비율이 min_patch_white_ratio 이상이어야 함(둘 다 공통).
+        - lane_kind == 'right': 초록(patch_green_ratio_min)과 회색(patch_road_ratio_min)이
+          "둘 다" 일정 비율 이상이어야 함 -> 패치가 초록-회색 경계에 걸쳐 있다는 뜻.
+        - lane_kind == 'left' : 양옆이 전부 회색이라 초록은 안 나온다. 회색 비율만 검사.
+
+        패치 임계값(patch_green_ratio_min/patch_road_ratio_min)은 근접 밴드용
+        green_backed_ratio_min/road_flanked_ratio_min과 다른 값을 쓴다. 패치
+        방식은 흰 차선 자체가 패치 폭 일부를 차지하므로 초록+회색+흰색 비율의
+        합이 대략 1이 되고, 경계 부근에서는 흰색 비율만으로도 상당 부분을
+        차지해 초록+회색 임계값의 합이 크면(예: 0.70) 어떤 컬럼도 동시에
+        만족시킬 수 없다.
+        """
+        white_ok = white_ratio > self.min_patch_white_ratio
+        if lane_kind == 'right':
+            color_ok = (green_ratio > self.patch_green_ratio_min) & (
+                road_ratio > self.patch_road_ratio_min
+            )
+        else:
+            color_ok = road_ratio > self.patch_road_ratio_min
+        return white_ok & color_ok
 
     # ======================================================================
     # 기준선 시작 위치 찾기 (오른쪽 실선 / 왼쪽 점선을 각각 독립적으로 탐지)
@@ -431,7 +640,11 @@ class TimedLaneOffsetNode(Node):
           검사하므로, 크로스워크나 주차구획선처럼 green_backed는 아니지만
           왼쪽 차선도 아닌 흰 마킹을 잘못 왼쪽 차선으로 잡는 걸 막아준다.
 
-        각각 후보가 여럿이면 가장 오른쪽 것을 사용한다. 후보가 없으면 None.
+        각각 후보가 여럿이면 이전 프레임에서 채택했던 위치(prev_right_x/
+        prev_left_x)와 가장 가까운 것을 사용한다(select_candidate_with_continuity).
+        도로 이음새 등 폭 필터를 뚫고 들어온 노이즈가 매 프레임 다른 후보로
+        잘못 선택되어 값이 튀는 것을 막기 위함이다. 이전 프레임 기록이 없으면
+        (첫 프레임 등) 가장 오른쪽 것을 쓴다. 후보가 없으면 None.
         """
         band_white = white_mask[-self.near_field_rows:, :]
         band_green = green_mask[-self.near_field_rows:, :]
@@ -443,6 +656,7 @@ class TimedLaneOffsetNode(Node):
             self.min_line_height_px,
             self.min_line_aspect_ratio,
             self.near_field_full_height_ratio,
+            self.min_line_avg_width_px,
         )
         if not boxes:
             return None, None
@@ -451,48 +665,61 @@ class TimedLaneOffsetNode(Node):
         left_candidates = []
         for x, _y, w, _h, _label in boxes:
             center_x = x + w // 2
+            left_edge = x
             right_edge = x + w
 
-            rx0 = min(right_edge + 10, width - 1)
-            rx1 = min(right_edge + 40, width)
-            green_ratio = 0.0
-            if rx1 > rx0:
-                strip = band_green[:, rx0:rx1]
-                green_ratio = float((strip > 0).mean()) if strip.size else 0.0
-            if green_ratio > 0.3:
+            if self.check_color_consistency(band_green, band_road, left_edge, right_edge, 'right'):
                 right_candidates.append(center_x)
-
-            lx0 = max(x - 40, 0)
-            lx1 = max(x - 10, 0)
-            left_road_ratio = 0.0
-            if lx1 > lx0:
-                strip = band_road[:, lx0:lx1]
-                left_road_ratio = float((strip > 0).mean()) if strip.size else 0.0
-            right_road_ratio = 0.0
-            if rx1 > rx0:
-                strip = band_road[:, rx0:rx1]
-                right_road_ratio = float((strip > 0).mean()) if strip.size else 0.0
-            if left_road_ratio > 0.40 and right_road_ratio > 0.40:
+            if self.check_color_consistency(band_green, band_road, left_edge, right_edge, 'left'):
                 left_candidates.append(center_x)
 
-        right_x = max(right_candidates) if right_candidates else None
-        left_x = max(left_candidates) if left_candidates else None
+        right_x = self.select_candidate_with_continuity(right_candidates, self.prev_right_x)
+        left_x = self.select_candidate_with_continuity(left_candidates, self.prev_left_x)
+        if right_x is not None:
+            self.prev_right_x = right_x
+        if left_x is not None:
+            self.prev_left_x = left_x
         return right_x, left_x
+
+    def select_candidate_with_continuity(self, candidates, prev_x):
+        """후보 목록에서 이전 프레임 위치(prev_x)와 가장 가까운 것을 고른다.
+
+        prev_x가 없으면(아직 한 번도 탐지된 적 없음) 가장 오른쪽 것을 쓴다
+        (기존 동작과 동일한 초기값 규칙).
+        """
+        if not candidates:
+            return None
+        if prev_x is not None:
+            return min(candidates, key=lambda c: abs(c - prev_x))
+        return max(candidates)
 
     # ======================================================================
     # 슬라이딩 윈도우로 곡선 추적
     # ======================================================================
-    def track_line_with_sliding_window(self, white_mask, base_x):
-        """오른쪽 차선 x좌표(ROI 하단 기준)와 함께, 그린 윈도우/사용된 픽셀도 반환(디버그용).
+    def track_line_with_sliding_window(self, white_mask, green_mask, road_mask, base_x, lane_kind):
+        """차선 x좌표(ROI 하단 기준)와 함께, 그린 윈도우/사용된 픽셀도 반환(디버그용).
 
-        윈도우 한 단(~20px)은 근접 밴드(70px)와 달리 높이가 짧아서 "세로로
-        길다"는 모양 기준이 잘 안 통한다(꽃 그림도 짧은 윈도우 하나를 그냥
-        관통해버림). 대신 윈도우 폭(window_margin)을 좁게 잡고, 윈도우 안에
-        여러 덩어리가 있으면 지금 추적 중인 x와 가장 가까운 덩어리만 골라서
-        옆에 있는 꽃 그림 등이 평균에 섞여 들어가지 않게 한다.
+        아래에서 위로 올라가며(윈도우 한 단씩) 차선을 추적하되, 각 단에서
+        "어느 컬럼이 lane_kind 경계선 조각인가"를 방향(좌/우) 가정 없이 패치
+        단위로 검사한다:
+
+        1) 색 혼합 비율: 이 단의 각 컬럼 x를 중심으로 patch_width_px 폭 정사각
+           패치를 만들고, 그 안의 흰색/초록/회색 비율을 계산한다
+           (compute_patch_ratio_profile). patch_is_lane_boundary로 "이 패치가
+           lane_kind 특징(오른쪽=초록+회색 혼합, 왼쪽=회색)에 맞는가"를 판정한다.
+           패치가 등방적(정사각형)이라 차선이 이미지 안에서 어느 각도로 놓여
+           있어도(급커브로 로컬 방향이 수평에 가까워져도) 그대로 적용된다.
+        2) 연속성 제약(window_max_step_px): 색이 맞는 패치가 여럿이면 이전
+           윈도우의 x_current에서 가장 가까운 것만 인정한다. 너무 멀리 떨어진
+           패치는(색이 맞아도) 물리적으로 이어질 수 없다고 보고 후보에서 뺀다
+           (급커브 안쪽의 반대쪽 차선 등).
+
+        색 조건을 만족하는 컬럼이 있으면 그중 x_current와 가장 가까운 것을 쓰고,
+        없으면(그림자 등으로 색 판정이 애매한 구간) 이번 윈도우는 건너뛴다(추적 유지).
         """
         height, width = white_mask.shape
         window_height = max(1, height // self.num_windows)
+        half_patch = self.patch_width_px // 2
         x_current = base_x
 
         windows = []
@@ -501,29 +728,43 @@ class TimedLaneOffsetNode(Node):
         for i in range(self.num_windows):
             y_high = height - i * window_height
             y_low = max(0, height - (i + 1) * window_height)
-            # x_current가 윈도우의 가운데가 아니라 오른쪽 경계에 오게 해서
-            # 차선 오른쪽의 초록 매트/꽃 그림이 윈도우에 덜 들어오게 한다.
-            x_right = min(width - 1, x_current)
-            x_low = max(0, x_right - self.window_margin * 2)
-            x_high = min(width, x_right + 1)
-            windows.append((x_low, x_right, y_low, y_high))
 
-            if x_high <= x_low or y_high <= y_low:
+            if y_high <= y_low:
+                windows.append((x_current, x_current, y_low, y_high))
                 continue
 
-            sub_mask = white_mask[y_low:y_high, x_low:x_high]
-            num_labels, labels, _stats, centroids = cv2.connectedComponentsWithStats(
-                sub_mask, connectivity=8
+            white_band = white_mask[y_low:y_high, :]
+            green_band = green_mask[y_low:y_high, :]
+            road_band = road_mask[y_low:y_high, :]
+
+            white_ratio_profile = self.compute_patch_ratio_profile(white_band)
+            green_ratio_profile = self.compute_patch_ratio_profile(green_band)
+            road_ratio_profile = self.compute_patch_ratio_profile(road_band)
+
+            is_boundary = self.patch_is_lane_boundary(
+                white_ratio_profile, green_ratio_profile, road_ratio_profile, lane_kind
             )
-            if num_labels <= 1:
+            candidate_xs = np.where(is_boundary)[0]
+
+            if candidate_xs.size == 0:
+                windows.append((x_current, x_current, y_low, y_high))
                 continue
 
-            best_label = min(
-                range(1, num_labels),
-                key=lambda label: abs((centroids[label][0] + x_low) - x_current),
-            )
-            local_ys, local_xs = np.where(labels == best_label)
-            xs = local_xs + x_low
+            steps = np.abs(candidate_xs - x_current)
+            within_step = steps <= self.window_max_step_px
+            if not np.any(within_step):
+                windows.append((x_current, x_current, y_low, y_high))
+                continue
+            candidate_xs = candidate_xs[within_step]
+            steps = steps[within_step]
+
+            x_new = int(candidate_xs[np.argmin(steps)])
+            x_low_patch = max(0, x_new - half_patch)
+            x_high_patch = min(width, x_new + half_patch + 1)
+            windows.append((x_low_patch, x_high_patch, y_low, y_high))
+
+            local_ys, local_xs = np.where(white_band[:, x_low_patch:x_high_patch] > 0)
+            xs = local_xs + x_low_patch
             ys = local_ys + y_low
 
             if xs.size >= self.window_minpix:
