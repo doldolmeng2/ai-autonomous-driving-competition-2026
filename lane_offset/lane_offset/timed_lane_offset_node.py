@@ -2,19 +2,33 @@
 
 역할:
     시간주행(2차로 고정 주행) 미션에서 /camera/high/image_raw 를 받아
-    "오른쪽 차선(실선)과 차 사이의 간격"을 계산해 /lane_offset 으로 발행한다.
+    차와 차선 사이의 간격을 계산해 /lane_offset 으로 발행한다.
 
 트랙 특징(2차로 = 오른쪽 차로 기준):
     - 오른쪽 차선(실선) 바깥쪽은 초록색 매트
-    - 왼쪽 차선(점선, 1차로와의 중앙선) 바깥쪽은 그냥 검은 도로(색으로 구분 안 됨)
-    - 따라서 점선이 끊겨서 좌/우 차선 중 어느 쪽인지 애매할 때는,
-      "차선 바로 오른쪽이 초록색인가"로 오른쪽(실선) 차선을 특정한다.
+    - 왼쪽 차선(점선, 1차로와의 중앙선) 양옆은 회색 아스팔트 도로
+    - 오른쪽은 "바로 오른쪽이 초록색인가"로, 왼쪽은 "양옆이 회색 도로
+      색인가"로 서로 독립적으로 판별한다.
 
-기준값(target_offset_px):
+기준선 결정(오른쪽/왼쪽 독립 탐지 후 결합):
+    - 근접 밴드에서 차선 모양 후보 중 green_backed(오른쪽이 초록색)인 것을
+      오른쪽 차선으로, road_flanked(양옆이 회색 도로)인 것을 왼쪽 차선으로
+      각각 독립적으로 찾는다(둘 다 동시에 검출될 수 있음).
+    - 둘 다 보이면: 각자의 target_offset_px를 뺀 offset을 평균해서 최종
+      lane_offset으로 쓴다(두 측정이 서로를 검증해줘서 더 안정적).
+    - 하나만 보이면: 보이는 쪽의 offset만 그대로 쓴다.
+    - 둘 다 안 보이면: 마지막 유효 offset을 유지한다.
+
+기준값(target_offset_px / left_target_offset_px):
     rosbag2_2026_07_01-15_30_56 (2차선 주행 녹화본)을 분석해 직선 구간에서
     "오른쪽 차선 x좌표 - 이미지 중심" 값이 평균 195px 근처로 유지됨을 확인했다.
     이 값을 기준(0)으로 삼고, 현재 프레임에서 측정한 값과의 차이를
     /lane_offset 으로 발행한다. (양수 = 차가 왼쪽으로 치우쳐서 우회전 필요)
+    left_target_offset_px(-212)는 scripts/calibrate_left_offset.py 로 같은
+    bag에서 "오른쪽 기준 offset이 거의 0으로 잘 맞아떨어지는 프레임들"만 골라
+    그때의 왼쪽 차선 x좌표 중앙값으로 구했다(오른쪽 캘리브레이션과 같은 기준을
+    공유). left 토픽을 camera_high로 remap해 측정한 값이라 실제 카메라로는
+    재검증이 필요할 수 있다.
 
 노이즈 대응:
     - ROI 상/하단을 크롭해 차량 후드와 배경(천장/바닥 반사)을 제외한다.
@@ -49,60 +63,86 @@ import cv2
 # (전부 ROS 파라미터로도 선언되므로 --ros-args -p 로 실행 중 덮어쓰기도 가능)
 # ============================================================================
 
-# 구독/발행 토픽
-IMAGE_TOPIC = '/camera/high/image_raw'
-LANE_OFFSET_TOPIC = '/lane_offset'
+# ---- 토픽 -------------------------------------------------------------
+IMAGE_TOPIC = '/camera/high/image_raw'  # 구독: 원본 카메라 이미지
+LANE_OFFSET_TOPIC = '/lane_offset'      # 발행: 계산된 차선 offset(px, Int16)
 
-# ROI: 이미지 상단(배경)과 하단(차량 후드)을 잘라낸다. (640x360 기준)
-ROI_TOP = 100
-ROI_BOTTOM = 280
+# ---- ROI ---------------------------------------------------------------
+# 이미지 상단(배경/천장·바닥 반사)과 하단(차량 후드)을 잘라낸다. (640x360 기준)
+ROI_TOP = 90     # ROI 상단 y좌표: 이보다 위는 크롭
+ROI_BOTTOM = 280  # ROI 하단 y좌표: 이보다 아래(차량 후드)는 크롭
 
-# 흰색(차선/횡단보도) HSV 임계값
-WHITE_S_MAX = 60
-WHITE_V_MIN = 140
-# 초록색(오른쪽 차선 바깥 매트) HSV 임계값
-GREEN_H_MIN = 30
-GREEN_H_MAX = 90
-GREEN_S_MIN = 40
-GREEN_V_MIN = 70
+# ---- 흰색(차선/횡단보도) HSV 임계값 --------------------------------------
+# H 범위를 좁혀서 신호등 트러스 등 다른 흰색 구조물을 배제한다.
+WHITE_H_MIN = 25   # 흰색 판정 H 하한
+WHITE_H_MAX = 115  # 흰색 판정 H 상한
+WHITE_S_MAX = 25   # 흰색 판정 S 상한(채도가 낮아야 흰색)
+WHITE_V_MIN = 173  # 흰색 판정 V 하한(밝아야 흰색)
+# H 범위를 좁힌 부작용으로 차선 픽셀이 군데군데 끊기는 것을 메우는
+# morphological closing 커널 크기(px). 노이즈 자체를 다시 허용하는 대신
+# 이미 검출된 흰색 조각들끼리만 이어붙인다.
+WHITE_CLOSE_KERNEL_PX = 7
 
-# 오른쪽 차선 탐색에 쓰는 근접(ROI 하단) 밴드 높이
-NEAR_FIELD_ROWS = 70
-# 근접 밴드에서 흰색 비율이 이 값을 넘으면 횡단보도 등으로 판단하고 무시
-WHITE_OVERLOAD_RATIO = 0.15
+# ---- 초록색(오른쪽 차선 바깥 매트) HSV 임계값 -----------------------------
+GREEN_H_MIN = 30  # 초록 판정 H 하한
+GREEN_H_MAX = 90  # 초록 판정 H 상한
+GREEN_S_MIN = 40  # 초록 판정 S 하한
+GREEN_V_MIN = 70  # 초록 판정 V 하한
 
-# 직선 구간 rosbag 분석으로 얻은 기준 offset(px). 실차 재조정 시 수정.
+# ---- 회색 도로(왼쪽 차선 양옆) HSV 임계값 ---------------------------------
+# hsv_tuner로 실측한 값.
+ROAD_H_MIN = 31    # 도로색 판정 H 하한
+ROAD_H_MAX = 179   # 도로색 판정 H 상한
+ROAD_S_MIN = 0     # 도로색 판정 S 하한
+ROAD_S_MAX = 54    # 도로색 판정 S 상한(채도가 낮은 무채색 계열)
+ROAD_V_MIN = 0     # 도로색 판정 V 하한
+ROAD_V_MAX = 92   # 도로색 판정 V 상한(너무 밝지 않은 아스팔트 톤)
+
+# ---- 근접 밴드(기준선 탐색) ----------------------------------------------
+NEAR_FIELD_ROWS = 70        # 오른쪽/왼쪽 차선 시작점을 찾는 ROI 하단 밴드 높이(px)
+WHITE_OVERLOAD_RATIO = 0.30  # 근접 밴드 흰색 비율이 이 값을 넘으면 횡단보도 등으로 보고 이번 측정을 버림
+
+# ---- 기준 offset(px): 차량이 차로 중앙에 있을 때의 기대 x좌표 - 이미지 중심 ---
+# 직선 구간 rosbag 분석으로 얻은 오른쪽 차선 기준 offset. 실차 재조정 시 수정.
 TARGET_OFFSET_PX = 195
-# 한 프레임 사이 offset이 이 값보다 더 튀면 오검출로 보고 이전 값 유지
-MAX_OFFSET_JUMP_PX = 80
+# 왼쪽 차선(점선) 전용 기준 offset(px).
+# scripts/calibrate_left_offset.py 로 실측(중앙값, n=375, stdev=94px).
+# 오른쪽 기준(+195)과 부호만 반대로 거의 대칭이라(차로 폭 ≈ 407px) 물리적으로도
+# 타당하다. bag의 left 토픽을 camera_high로 remap해 측정한 값이라 실제
+# camera_high 하드웨어로 재측정하면 미세 조정이 필요할 수 있음.
+LEFT_TARGET_OFFSET_PX = -212
+# 한 프레임 사이 offset이 이 값(px)보다 더 튀면 오검출로 보고 이전 값 유지
+MAX_OFFSET_JUMP_PX = 150
 
-# 슬라이딩 윈도우 (범위를 좁게 잡아서 옆에 있는 꽃 그림 등을 덜 건드리게 함)
-NUM_WINDOWS = 7
-WINDOW_MARGIN = 27
-WINDOW_MINPIX = 50
+# ---- 슬라이딩 윈도우(곡선 추적) -------------------------------------------
+# 범위를 좁게 잡아서 옆에 있는 꽃 그림 등을 덜 건드리게 함.
+NUM_WINDOWS = 7      # ROI를 세로로 나누는 윈도우 개수(아래->위로 순차 추적)
+WINDOW_MARGIN = 27   # 윈도우 폭의 절반(px): 실제 폭은 x_current 기준 좌우 margin*2
+WINDOW_MINPIX = 50   # 윈도우 안에서 이 픽셀 수 이상 모여야 x_current를 갱신
 
-# 모양 필터(near-field 차선 시작점 탐색용): 초록 매트 위 흰 꽃 그림 등은
-# 색은 흰색이지만 작고 동글동글한 덩어리다. 아래 둘 중 하나를 만족해야
-# 차선 후보로 인정한다.
+# ---- 모양 필터(near-field 차선 시작점 탐색용) ------------------------------
+# 초록 매트 위 흰 꽃 그림 등은 색은 흰색이지만 작고 동글동글한 덩어리다.
+# 아래 둘 중 하나를 만족해야 차선 후보로 인정한다.
 #   1) span: 밴드 높이의 대부분을 채움 -> 실선/점선은 곡선에서 옆으로
 #      휘어져도(가로 폭이 넓어져도) 밴드를 처음부터 끝까지 관통하지만,
 #      꽃 그림은 작은 덩어리라 밴드 높이를 거의 못 채운다.
 #   2) aspect: 세로로 길고 가로로 짧음 -> 밴드를 다 못 채우는 짧은
 #      점선 조각이라도 모양 자체가 길쭉하면 인정.
-NEAR_FIELD_FULL_HEIGHT_RATIO = 0.8
-MIN_LINE_ASPECT_RATIO = 1.5
-MIN_LINE_HEIGHT_PX = 20
+NEAR_FIELD_FULL_HEIGHT_RATIO = 0.8  # span 기준: 밴드 높이 대비 덩어리 높이 비율 임계값
+MIN_LINE_ASPECT_RATIO = 1.5         # aspect 기준: 세로/가로 비율 임계값
+MIN_LINE_HEIGHT_PX = 20             # aspect 기준: 최소 세로 길이(px)
 
-# 디버그 시각화: ROI/차선/슬라이딩 윈도우를 그린 화면을 바로 OpenCV 창으로 띄운다.
+# ---- 디버그 시각화 --------------------------------------------------------
+# ROI/차선/슬라이딩 윈도우를 그린 화면을 바로 OpenCV 창으로 띄운다.
 # (bag/카메라 토픽만 켜져 있으면, 이 노드 실행만으로 인식 화면이 뜬다.)
 # 실차 대회 주행 시에는 CPU 절약을 위해 False로 끄는 것을 권장.
 DEBUG_VIEW = True
-WINDOW_NAME = 'timed_lane_offset_debug'
-DEBUG_IMAGE_TOPIC = '/lane_offset/debug_image'
+WINDOW_NAME = 'timed_lane_offset_debug'          # OpenCV 디버그 창 이름
+DEBUG_IMAGE_TOPIC = '/lane_offset/debug_image'    # 디버그 이미지를 토픽으로도 발행할 때 쓰는 토픽명
 
 
 class TimedLaneOffsetNode(Node):
-    """/camera/high/image_raw -> 오른쪽 차선 기준 offset을 계산해 /lane_offset 발행."""
+    """/camera/high/image_raw -> 오른쪽(주)/왼쪽(보조) 차선 기준 offset을 계산해 /lane_offset 발행."""
 
     def __init__(self):
         super().__init__('timed_lane_offset_node')
@@ -110,15 +150,25 @@ class TimedLaneOffsetNode(Node):
         # ---- 파라미터 ------------------------------------------------------
         self.declare_parameter('roi_top', ROI_TOP)
         self.declare_parameter('roi_bottom', ROI_BOTTOM)
+        self.declare_parameter('white_h_min', WHITE_H_MIN)
+        self.declare_parameter('white_h_max', WHITE_H_MAX)
         self.declare_parameter('white_s_max', WHITE_S_MAX)
         self.declare_parameter('white_v_min', WHITE_V_MIN)
+        self.declare_parameter('white_close_kernel_px', WHITE_CLOSE_KERNEL_PX)
         self.declare_parameter('green_h_min', GREEN_H_MIN)
         self.declare_parameter('green_h_max', GREEN_H_MAX)
         self.declare_parameter('green_s_min', GREEN_S_MIN)
         self.declare_parameter('green_v_min', GREEN_V_MIN)
+        self.declare_parameter('road_h_min', ROAD_H_MIN)
+        self.declare_parameter('road_h_max', ROAD_H_MAX)
+        self.declare_parameter('road_s_min', ROAD_S_MIN)
+        self.declare_parameter('road_s_max', ROAD_S_MAX)
+        self.declare_parameter('road_v_min', ROAD_V_MIN)
+        self.declare_parameter('road_v_max', ROAD_V_MAX)
         self.declare_parameter('near_field_rows', NEAR_FIELD_ROWS)
         self.declare_parameter('white_overload_ratio', WHITE_OVERLOAD_RATIO)
         self.declare_parameter('target_offset_px', TARGET_OFFSET_PX)
+        self.declare_parameter('left_target_offset_px', LEFT_TARGET_OFFSET_PX)
         self.declare_parameter('max_offset_jump_px', MAX_OFFSET_JUMP_PX)
         self.declare_parameter('num_windows', NUM_WINDOWS)
         self.declare_parameter('window_margin', WINDOW_MARGIN)
@@ -134,17 +184,34 @@ class TimedLaneOffsetNode(Node):
         self.lane_offset_topic = LANE_OFFSET_TOPIC
         self.roi_top = int(self.get_parameter('roi_top').value)
         self.roi_bottom = int(self.get_parameter('roi_bottom').value)
+        self.white_h_min = int(self.get_parameter('white_h_min').value)
+        self.white_h_max = int(self.get_parameter('white_h_max').value)
         self.white_s_max = int(self.get_parameter('white_s_max').value)
         self.white_v_min = int(self.get_parameter('white_v_min').value)
+        white_close_kernel_px = int(self.get_parameter('white_close_kernel_px').value)
+        self.white_close_kernel = None
+        if white_close_kernel_px > 1:
+            self.white_close_kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (white_close_kernel_px, white_close_kernel_px)
+            )
         self.green_h_min = int(self.get_parameter('green_h_min').value)
         self.green_h_max = int(self.get_parameter('green_h_max').value)
         self.green_s_min = int(self.get_parameter('green_s_min').value)
         self.green_v_min = int(self.get_parameter('green_v_min').value)
+        self.road_h_min = int(self.get_parameter('road_h_min').value)
+        self.road_h_max = int(self.get_parameter('road_h_max').value)
+        self.road_s_min = int(self.get_parameter('road_s_min').value)
+        self.road_s_max = int(self.get_parameter('road_s_max').value)
+        self.road_v_min = int(self.get_parameter('road_v_min').value)
+        self.road_v_max = int(self.get_parameter('road_v_max').value)
         self.near_field_rows = int(self.get_parameter('near_field_rows').value)
         self.white_overload_ratio = float(
             self.get_parameter('white_overload_ratio').value
         )
         self.target_offset_px = int(self.get_parameter('target_offset_px').value)
+        self.left_target_offset_px = int(
+            self.get_parameter('left_target_offset_px').value
+        )
         self.max_offset_jump_px = int(
             self.get_parameter('max_offset_jump_px').value
         )
@@ -177,7 +244,8 @@ class TimedLaneOffsetNode(Node):
 
         self.get_logger().info(
             f'Subscribing {self.image_topic}, publishing {self.lane_offset_topic}, '
-            f'target_offset_px={self.target_offset_px}'
+            f'target_offset_px={self.target_offset_px}, '
+            f'left_target_offset_px={self.left_target_offset_px}'
         )
 
     # ======================================================================
@@ -195,6 +263,7 @@ class TimedLaneOffsetNode(Node):
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         white_mask = self.make_white_mask(hsv)
         green_mask = self.make_green_mask(hsv)
+        road_mask = self.make_road_mask(hsv)
 
         near = white_mask[-self.near_field_rows:, :]
         near_white_ratio = float((near > 0).mean()) if near.size else 0.0
@@ -210,8 +279,8 @@ class TimedLaneOffsetNode(Node):
             self.publish_debug(msg, frame, 'WHITE OVERLOAD', near_white_ratio)
             return
 
-        base_x = self.find_right_line_base(white_mask, green_mask)
-        if base_x is None:
+        right_x, left_x = self.find_lane_bases(white_mask, green_mask, road_mask)
+        if right_x is None and left_x is None:
             self.get_logger().warn(
                 'No lane pixels found, holding last offset', throttle_duration_sec=1.0
             )
@@ -219,12 +288,42 @@ class TimedLaneOffsetNode(Node):
             self.publish_debug(msg, frame, 'NO LANE FOUND', near_white_ratio)
             return
 
-        line_x, windows, points_x, points_y = self.track_line_with_sliding_window(
-            white_mask, base_x
-        )
+        # 오른쪽/왼쪽 중 보이는 쪽마다 각자의 기준 offset을 뺀 값을 구하고,
+        # 둘 다 보이면 평균해서 서로가 서로를 검증하도록 한다.
         center_x = frame.shape[1] / 2.0
-        raw_offset = line_x - center_x
-        lane_offset = int(round(raw_offset - self.target_offset_px))
+        offsets = []
+        base_points = []
+        windows_all = []
+        points_x_all = []
+        points_y_all = []
+
+        if right_x is not None:
+            line_x_r, windows_r, px_r, py_r = self.track_line_with_sliding_window(
+                white_mask, right_x
+            )
+            offsets.append((line_x_r - center_x) - self.target_offset_px)
+            base_points.append(right_x)
+            windows_all.extend(windows_r)
+            points_x_all.extend(px_r)
+            points_y_all.extend(py_r)
+
+        if left_x is not None:
+            line_x_l, windows_l, px_l, py_l = self.track_line_with_sliding_window(
+                white_mask, left_x
+            )
+            offsets.append((line_x_l - center_x) - self.left_target_offset_px)
+            base_points.append(left_x)
+            windows_all.extend(windows_l)
+            points_x_all.extend(px_l)
+            points_y_all.extend(py_l)
+
+        lane_offset = int(round(sum(offsets) / len(offsets)))
+        if right_x is not None and left_x is not None:
+            mode = 'both'
+        elif right_x is not None:
+            mode = 'right'
+        else:
+            mode = 'left'
 
         if abs(lane_offset - self.last_offset) > self.max_offset_jump_px:
             # 한 프레임 만에 비정상적으로 튀면 오검출로 보고 이전 값 유지
@@ -236,8 +335,9 @@ class TimedLaneOffsetNode(Node):
             self.publish_offset(self.last_offset)
             self.publish_debug(
                 msg, frame, 'JUMP REJECTED', near_white_ratio,
-                base_x=base_x, line_x=line_x, windows=windows,
-                points_x=points_x, points_y=points_y, lane_offset=lane_offset,
+                base_x=base_points, windows=windows_all,
+                points_x=points_x_all, points_y=points_y_all, lane_offset=lane_offset,
+                mode=mode,
             )
             return
 
@@ -245,8 +345,9 @@ class TimedLaneOffsetNode(Node):
         self.publish_offset(lane_offset)
         self.publish_debug(
             msg, frame, 'OK', near_white_ratio,
-            base_x=base_x, line_x=line_x, windows=windows,
-            points_x=points_x, points_y=points_y, lane_offset=lane_offset,
+            base_x=base_points, windows=windows_all,
+            points_x=points_x_all, points_y=points_y_all, lane_offset=lane_offset,
+            mode=mode,
         )
 
     def publish_offset(self, value):
@@ -258,9 +359,17 @@ class TimedLaneOffsetNode(Node):
     # 색상 마스크
     # ======================================================================
     def make_white_mask(self, hsv):
-        _, s, v = cv2.split(hsv)
-        mask = (s < self.white_s_max) & (v > self.white_v_min)
-        return (mask.astype(np.uint8)) * 255
+        h, s, v = cv2.split(hsv)
+        mask = (
+            (h > self.white_h_min)
+            & (h < self.white_h_max)
+            & (s < self.white_s_max)
+            & (v > self.white_v_min)
+        )
+        mask = (mask.astype(np.uint8)) * 255
+        if self.white_close_kernel is not None:
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self.white_close_kernel)
+        return mask
 
     def make_green_mask(self, hsv):
         h, s, v = cv2.split(hsv)
@@ -271,6 +380,11 @@ class TimedLaneOffsetNode(Node):
             & (v > self.green_v_min)
         )
         return (mask.astype(np.uint8)) * 255
+
+    def make_road_mask(self, hsv):
+        lower = (self.road_h_min, self.road_s_min, self.road_v_min)
+        upper = (self.road_h_max, self.road_s_max, self.road_v_max)
+        return cv2.inRange(hsv, lower, upper)
 
     # ======================================================================
     # 모양 필터: 차선(세로로 길고 가로로 짧음) vs 꽃 그림 등 (동글동글한 덩어리)
@@ -302,12 +416,26 @@ class TimedLaneOffsetNode(Node):
         return boxes, labels
 
     # ======================================================================
-    # 오른쪽 차선(실선) 시작 위치 찾기
+    # 기준선 시작 위치 찾기 (오른쪽 실선 / 왼쪽 점선을 각각 독립적으로 탐지)
     # ======================================================================
-    def find_right_line_base(self, white_mask, green_mask):
-        """근접 밴드에서 차선 모양 후보를 찾고, 오른쪽이 초록색인 것을 오른쪽 차선으로 본다."""
+    def find_lane_bases(self, white_mask, green_mask, road_mask):
+        """근접 밴드에서 오른쪽/왼쪽 후보를 독립적으로 찾아 (right_x, left_x)로 반환.
+
+        같은 후보 목록(차선 모양 필터를 통과한 흰 덩어리)에 대해 서로 다른
+        기준으로 각각 검사한다. 한 후보가 두 조건을 동시에 만족하는 일은
+        거의 없다(초록으로 확인되면 road_ratio가 낮게 나온다).
+
+        - 오른쪽: 덩어리 바로 오른쪽이 초록색 매트인가 (green_backed)
+        - 왼쪽: 덩어리 양옆(왼쪽 스트립 + 오른쪽 스트립) 모두 회색 도로색인가
+          (road_flanked). 소거법이 아니라 hsv_tuner로 실측한 도로색을 직접
+          검사하므로, 크로스워크나 주차구획선처럼 green_backed는 아니지만
+          왼쪽 차선도 아닌 흰 마킹을 잘못 왼쪽 차선으로 잡는 걸 막아준다.
+
+        각각 후보가 여럿이면 가장 오른쪽 것을 사용한다. 후보가 없으면 None.
+        """
         band_white = white_mask[-self.near_field_rows:, :]
         band_green = green_mask[-self.near_field_rows:, :]
+        band_road = road_mask[-self.near_field_rows:, :]
         width = band_white.shape[1]
 
         boxes, _labels = self.find_lane_shaped_components(
@@ -317,26 +445,39 @@ class TimedLaneOffsetNode(Node):
             self.near_field_full_height_ratio,
         )
         if not boxes:
-            return None
+            return None, None
 
-        green_backed = []
+        right_candidates = []
+        left_candidates = []
         for x, _y, w, _h, _label in boxes:
+            center_x = x + w // 2
             right_edge = x + w
-            x0 = min(right_edge + 10, width - 1)
-            x1 = min(right_edge + 40, width)
-            if x1 <= x0:
-                continue
-            strip = band_green[:, x0:x1]
-            green_ratio = float((strip > 0).mean()) if strip.size else 0.0
-            if green_ratio > 0.4:
-                green_backed.append(x + w // 2)
 
-        if green_backed:
-            # 오른쪽 바깥이 초록색으로 확인된 것 중 가장 오른쪽 = 오른쪽 실선
-            return max(green_backed)
-        # 점선/실선 둘 다 초록 확인이 안 되면(가려짐 등) 가장 오른쪽 후보로 대체
-        x, _y, w, _h, _label = max(boxes, key=lambda b: b[0] + b[2])
-        return x + w // 2
+            rx0 = min(right_edge + 10, width - 1)
+            rx1 = min(right_edge + 40, width)
+            green_ratio = 0.0
+            if rx1 > rx0:
+                strip = band_green[:, rx0:rx1]
+                green_ratio = float((strip > 0).mean()) if strip.size else 0.0
+            if green_ratio > 0.3:
+                right_candidates.append(center_x)
+
+            lx0 = max(x - 40, 0)
+            lx1 = max(x - 10, 0)
+            left_road_ratio = 0.0
+            if lx1 > lx0:
+                strip = band_road[:, lx0:lx1]
+                left_road_ratio = float((strip > 0).mean()) if strip.size else 0.0
+            right_road_ratio = 0.0
+            if rx1 > rx0:
+                strip = band_road[:, rx0:rx1]
+                right_road_ratio = float((strip > 0).mean()) if strip.size else 0.0
+            if left_road_ratio > 0.40 and right_road_ratio > 0.40:
+                left_candidates.append(center_x)
+
+        right_x = max(right_candidates) if right_candidates else None
+        left_x = max(left_candidates) if left_candidates else None
+        return right_x, left_x
 
     # ======================================================================
     # 슬라이딩 윈도우로 곡선 추적
@@ -408,8 +549,8 @@ class TimedLaneOffsetNode(Node):
     # ======================================================================
     def publish_debug(
         self, src_msg, frame, status, near_white_ratio,
-        base_x=None, line_x=None, windows=None,
-        points_x=None, points_y=None, lane_offset=None,
+        base_x=None, windows=None,
+        points_x=None, points_y=None, lane_offset=None, mode=None,
     ):
         if not (self.debug_view or self.publish_debug_image):
             return
@@ -422,10 +563,14 @@ class TimedLaneOffsetNode(Node):
         cv2.rectangle(
             debug, (0, self.roi_top), (width - 1, self.roi_bottom - 1), (0, 255, 255), 1
         )
-        # 차량 중심선(흰색)과 기준 offset 위치(주황, "여기 있어야 lane_offset=0")
+        # 차량 중심선(흰색)과 오른쪽/왼쪽 기준 offset 위치(각각 주황/청록 점선,
+        # "여기 있어야 그 기준으로는 offset=0")를 둘 다 그려서 비교할 수 있게 한다.
         cv2.line(debug, (center_x, self.roi_top), (center_x, self.roi_bottom), (255, 255, 255), 1)
         self.draw_dashed_vline(
             debug, center_x + self.target_offset_px, self.roi_top, self.roi_bottom, (0, 165, 255)
+        )
+        self.draw_dashed_vline(
+            debug, center_x + self.left_target_offset_px, self.roi_top, self.roi_bottom, (255, 255, 0)
         )
 
         # 슬라이딩 윈도우 (파란 사각형, ROI 로컬 좌표 -> 전체 프레임 좌표로 오프셋)
@@ -444,14 +589,14 @@ class TimedLaneOffsetNode(Node):
             for px, py in zip(points_x, points_y):
                 cv2.circle(debug, (int(px), int(py) + self.roi_top), 1, (0, 255, 0), -1)
 
-        if base_x is not None:
-            cv2.circle(debug, (int(base_x), self.roi_bottom - 1), 5, (0, 0, 255), -1)
-        if line_x is not None:
-            cv2.circle(debug, (int(round(line_x)), self.roi_bottom - 1), 6, (0, 255, 0), 2)
+        # 근접 밴드에서 찾은 기준점(오른쪽/왼쪽 각각, 있는 만큼)
+        if base_x:
+            for bx in base_x:
+                cv2.circle(debug, (int(bx), self.roi_bottom - 1), 5, (0, 0, 255), -1)
 
         color = (0, 255, 0) if status == 'OK' else (0, 0, 255)
         lines = [
-            f'status: {status}',
+            f'status: {status} ({mode or "-"})',
             f'lane_offset: {lane_offset if lane_offset is not None else self.last_offset}',
             f'white_ratio: {near_white_ratio:.2f}',
         ]
