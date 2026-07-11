@@ -1,26 +1,30 @@
-from glob import glob
 from setuptools import find_packages, setup
 
-package_name = 'parking'
+package_name = "parking"
 
 setup(
     name=package_name,
-    version='0.0.0',
-    packages=find_packages(exclude=['test']),
+    version="0.1.0",
+    packages=find_packages(),
     data_files=[
-        ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
-        ('share/' + package_name, ['package.xml']),
-        ('share/' + package_name + '/launch', glob('launch/*.launch.py')),
+        (
+            "share/ament_index/resource_index/packages",
+            ["resource/" + package_name],
+        ),
+        ("share/" + package_name, ["package.xml"]),
+        ("share/" + package_name + "/config", ["config/parking.yaml"]),
+        ("share/" + package_name + "/launch", ["launch/parking.launch.py"]),
     ],
-    install_requires=['setuptools'],
+    install_requires=["setuptools", "numpy"],
     zip_safe=True,
-    maintainer='hailab',
-    maintainer_email='hailab@example.com',
-    description='Parking mission placeholder.',
-    license='TODO: License declaration',
+    maintainer="team",
+    maintainer_email="team@example.com",
+    description="LiDAR-primary ROS 2 reverse perpendicular parking",
+    license="Apache-2.0",
+    tests_require=["pytest"],
     entry_points={
-        'console_scripts': [
-            'parking_node = parking.parking_node:main',
+        "console_scripts": [
+            "parking_node = parking.parking_node:main",
         ],
     },
 )
