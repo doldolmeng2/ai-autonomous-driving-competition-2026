@@ -20,6 +20,10 @@ def generate_launch_description():
             package='lane_offset',
             executable='timed_lane_offset_node_osy',
             output='screen',
+            # OpenCV 차선/마스크 디버그 창을 항상 띄운다.
+            parameters=[{
+                'debug_view': True,
+            }],
         ),
         # offset -> steer/speed 계산
         Node(
@@ -27,8 +31,8 @@ def generate_launch_description():
             executable='timed_lane_main_node',
             output='screen',
             parameters=[{
-                'base_speed': 110,
-                'max_steer': 45,
+                'base_speed': 0,
+                'max_steer': 0,
             }],
         ),
         Node(
