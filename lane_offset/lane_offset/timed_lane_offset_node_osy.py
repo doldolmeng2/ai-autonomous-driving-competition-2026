@@ -108,6 +108,9 @@ CENTER_LINE_OVERLAP_DISTANCE_PX = 45
 # 이전 프레임의 검출 위치를 다음 프레임 윈도우 시작점에 반영하는 비율.
 # 0.20이면 한 프레임에 차이의 20%만 움직여 급격한 점프를 막는다.
 WINDOW_START_ADAPT_RATE = 0.5
+# 새 검출 위치가 이전 박스 시작점에서 이 거리보다 크게 튀면 오검출로 보고
+# 시작점을 갱신하지 않는다.
+MAX_WINDOW_START_JUMP_PX = 100
 # 곡선에서는 색 매트와 흰 실선이 같은 x strip에 정확히 겹치지 않는다. 이 거리
 # 이내면 "색 덩어리 근처의 흰 실선"으로 보고 슬라이딩 윈도우 시작점으로 사용한다.
 BOUNDARY_COLOR_NEAR_DISTANCE_PX = 100
@@ -180,6 +183,7 @@ class TimedLaneOffsetNode(Node):
         )
         self.declare_parameter('window_min_component_pixels', WINDOW_MIN_COMPONENT_PIXELS)
         self.declare_parameter('window_start_adapt_rate', WINDOW_START_ADAPT_RATE)
+        self.declare_parameter('max_window_start_jump_px', MAX_WINDOW_START_JUMP_PX)
         self.declare_parameter(
             'boundary_color_near_distance_px', BOUNDARY_COLOR_NEAR_DISTANCE_PX
         )
@@ -255,6 +259,9 @@ class TimedLaneOffsetNode(Node):
         )
         self.window_start_adapt_rate = float(np.clip(
             self.get_parameter('window_start_adapt_rate').value, 0.0, 1.0
+        ))
+        self.max_window_start_jump_px = max(0, int(
+            self.get_parameter('max_window_start_jump_px').value
         ))
         self.boundary_color_near_distance_px = int(
             self.get_parameter('boundary_color_near_distance_px').value
@@ -815,6 +822,13 @@ class TimedLaneOffsetNode(Node):
         previous_x = self.window_start_x[lane_name]
         if previous_x is None:
             next_x = float(detected_x)
+        elif abs(float(detected_x) - previous_x) > self.max_window_start_jump_px:
+            self.get_logger().warn(
+                f'{lane_name} window start jump rejected: '
+                f'{previous_x:.1f} -> {float(detected_x):.1f}',
+                throttle_duration_sec=1.0,
+            )
+            return
         else:
             next_x = previous_x + self.window_start_adapt_rate * (
                 float(detected_x) - previous_x
