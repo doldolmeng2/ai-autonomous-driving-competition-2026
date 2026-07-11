@@ -30,8 +30,8 @@
 const int ACTIVE_SENSOR_COUNT = 6;  // 센서 5개만 쓸 때는 5로 변경
 
 // // Arduino Mega 기준 기본 핀. 앞에서부터 ACTIVE_SENSOR_COUNT개만 사용함.
-const int TRIG_PINS[] = {22, 24, 26, 28, 30, 32};
-const int ECHO_PINS[] = {23, 25, 27, 29, 31, 33};
+const int TRIG_PINS[] = {22, 26, 30, 34, 38, 44};
+const int ECHO_PINS[] = {23, 27, 31, 35, 39, 45};
 
 const int CONFIGURED_SENSOR_COUNT = sizeof(TRIG_PINS) / sizeof(TRIG_PINS[0]);
 const int SENSOR_COUNT = min(ACTIVE_SENSOR_COUNT, CONFIGURED_SENSOR_COUNT);

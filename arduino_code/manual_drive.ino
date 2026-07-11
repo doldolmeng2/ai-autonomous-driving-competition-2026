@@ -22,8 +22,8 @@
     0    = 구동 정지
 
   실제 analogWrite PWM 값:
-    조향: 0~40
-    속도: 0~30
+    조향: 0~150
+    속도: 0~130
 */
 
 #define STEER_IN1   7
@@ -67,8 +67,8 @@ void setup() {
   Serial.println("Arduino motor controller ready.");
   Serial.println("Serial protocol: steer drive");
   Serial.println("Baudrate: 115200");
-  Serial.println("Max steer PWM: 40");
-  Serial.println("Max drive PWM: 30");
+  Serial.println("Max steer PWM: 150");
+  Serial.println("Max drive PWM: 130");
 #endif
 }
 
