@@ -19,7 +19,7 @@ LANE_OFFSET_TOPIC = '/lane_offset'
 MOTOR_CONTROL_TOPIC = '/motor_control'
 
 # 순항 속도(PWM). 실차 트랙에서 반드시 재조정 필요.
-BASE_SPEED = 30
+BASE_SPEED = 120
 # steer 값 clamp 범위 (-MAX_STEER ~ +MAX_STEER)
 MAX_STEER = 45
 
@@ -50,7 +50,8 @@ class TimedLaneMainNode(Node):
         )
 
     def lane_offset_callback(self, msg):
-        offset = msg.data
+        # lane_offset 노드가 발행한 -45~45 값을 그대로 목표 조향각으로 사용한다.
+        steer = int(msg.data)
         steer = max(-self.max_steer, min(self.max_steer, steer))
 
         command = Int16MultiArray()

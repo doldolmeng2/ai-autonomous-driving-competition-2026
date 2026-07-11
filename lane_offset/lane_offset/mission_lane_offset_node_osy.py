@@ -22,7 +22,7 @@ class MissionLaneOffsetNode(Node):
     """
 
     def __init__(self):
-        super().__init__('mission_lane_offset_node')
+        super().__init__('mission_lane_offset_node_osy')
 
         qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,

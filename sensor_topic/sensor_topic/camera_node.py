@@ -7,6 +7,7 @@ import cv2
 import rclpy
 import yaml
 from rclpy.node import Node
+from rclpy.impl.implementation_singleton import rclpy_implementation as _rclpy
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CameraInfo, Image
 
@@ -145,7 +146,13 @@ class CameraPublisher:
                 self.close()
                 continue
 
-            self.publish_frame(frame)
+            try:
+                self.publish_frame(frame)
+            except _rclpy.RCLError:
+                # Ctrl+C로 ROS context가 먼저 종료된 경우 publish 경쟁을 조용히 끝낸다.
+                if self.stop_event.is_set() or not rclpy.ok():
+                    break
+                raise
 
     def publish_frame(self, frame):
         stamp = self.node.get_clock().now().to_msg()
