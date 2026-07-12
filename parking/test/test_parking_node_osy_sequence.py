@@ -1,7 +1,6 @@
 import math
 from unittest.mock import patch
 
-import numpy as np
 import rclpy
 from sensor_msgs.msg import LaserScan
 
@@ -40,8 +39,10 @@ def test_full_perpendicular_t_parking_sequence():
     # must be added as B2 while the original RIGHT bundle remains B1.
     reverse_pair = make_scan([(-175, -155, 1.35), (-110, -82, 0.80)])
     reverse_b2_left = make_scan([(-175, -155, 1.35), (82, 110, 0.80)])
+    reverse_b2_approaching = make_scan([(-175, -155, 1.35), (82, 110, 0.75)])
+    reverse_b2_close = make_scan([(-175, -155, 1.35), (82, 110, 0.45)])
+    reverse_b2_receding = make_scan([(-175, -155, 1.35), (82, 110, 0.65)])
     reverse_single = make_scan([(-175, -150, 1.25)])
-    exit_reference = make_scan([(-105, -85, 1.00), (165, 180, 1.30)])
 
     def step(scan=empty, dt=0.1):
         clock[0] += dt
@@ -89,76 +90,27 @@ def test_full_perpendicular_t_parking_sequence():
             for _ in range(2):
                 step(reverse_b2_left)
             assert node.state == ParkingState.REVERSE_HARD_RIGHT
-            step(reverse_b2_left)
-            b2_y = None if node.observation.bundle2 is None else float(
-                node.bundle_centroid(node.observation.bundle2)[1]
-            )
-            assert node.state == ParkingState.REVERSE_BALANCE, (
-                    node.b2_left_confirm_count, b2_y,
-                    node.observation.bundle1_visible, node.observation.bundle2_visible,
-                    node.bundle_track_centroids,
-                    [node.bundle_centroid(bundle) for bundle in node.observation.vehicle_bundles],
-                )
-
-            # Losing only one vehicle for several scans must not finish parking.
-            for _ in range(5):
-                step(reverse_single)
-            assert node.state == ParkingState.REVERSE_BALANCE
-
-            # Parking completes only after zero bundles on five distinct scans.
-            for _ in range(4):
-                step(empty)
-            assert node.state == ParkingState.REVERSE_BALANCE
-            step(empty)
+            step(reverse_b2_approaching)
+            step(reverse_b2_close)
+            assert node.state == ParkingState.REVERSE_HARD_RIGHT
+            step(reverse_b2_receding)
             assert node.state == ParkingState.PARK_STOP
+            assert commands[-1] == (0, 0)
 
-            step_until(ParkingState.EXIT_STRAIGHT, empty)
-            for _ in range(10):
-                step(exit_reference)
-            assert node.exit_reference_seen
-            for _ in range(3):
-                step(empty)
-            assert node.state == ParkingState.EXIT_SET_RIGHT_STEER
+            step_until(ParkingState.EXIT_SET_RIGHT_STEER, empty)
             step_until(ParkingState.EXIT_RIGHT_TURN, empty)
             step_until(ParkingState.EXIT_FORWARD, empty)
             step_until(ParkingState.DONE, empty)
             step(empty)
             assert commands[-1] == (0, node.forward_speed)
 
-            # Stable IDs keep distance trim on top of the strong RIGHT reverse
-            # bias while still allowing a genuine negative error to steer LEFT.
-            def cloud(x, y):
-                offsets = [(-0.02, -0.02), (-0.02, 0.02), (0.0, 0.0),
-                           (0.02, -0.02), (0.02, 0.02)] * 3
-                return np.asarray(
-                    [(x + dx, y + dy) for dx, dy in offsets], dtype=float
-                )
-
-            node.reset_bundle_tracking()
-            node.update_bundle_tracks([cloud(-0.70, -0.40), cloud(0.70, 0.40)])
-            node.update_balance_steer()
-            assert node.last_balance_steer == node.balance_base_steer
-            for index in range(1, 11):
-                ratio = index / 10.0
-                node.update_bundle_tracks([
-                    cloud(-0.70 + 0.40 * ratio, -0.40 + 0.40 * ratio),
-                    cloud(-0.40, -0.10 - 1.50 * ratio),
-                ])
-                node.update_balance_steer()
-            assert node.last_balance_steer < 0
-
             # Failure cannot fall through to PARK_STOP/successful exit.
             node.transition(ParkingState.REVERSE_HARD_RIGHT, clock[0])
             step_until(ParkingState.PARKING_FAILED, empty)
             assert commands[-1] == (0, 0)
 
-            # Starting exit with no reference never permits an immediate turn.
-            node.transition(ParkingState.EXIT_STRAIGHT, clock[0])
-            step_until(ParkingState.PARKING_FAILED, empty)
-            assert commands[-1] == (0, 0)
-
             # All-inf scans are a sensor fault, not an empty parking slot.
-            node.transition(ParkingState.REVERSE_BALANCE, clock[0])
+            node.transition(ParkingState.REVERSE_HARD_RIGHT, clock[0])
             node.invalid_scan_count = 0
             invalid = make_scan(invalid=True)
             for _ in range(node.invalid_scan_confirm_frames):

@@ -30,9 +30,7 @@ class ParkingState(str, Enum):
     PASS_SECOND_CAR = 'PASS_SECOND_CAR'
     SET_REVERSE_STEER = 'SET_REVERSE_STEER'
     REVERSE_HARD_RIGHT = 'REVERSE_HARD_RIGHT'
-    REVERSE_BALANCE = 'REVERSE_BALANCE'
     PARK_STOP = 'PARK_STOP'
-    EXIT_STRAIGHT = 'EXIT_STRAIGHT'
     EXIT_SET_RIGHT_STEER = 'EXIT_SET_RIGHT_STEER'
     EXIT_RIGHT_TURN = 'EXIT_RIGHT_TURN'
     EXIT_FORWARD = 'EXIT_FORWARD'
@@ -53,7 +51,6 @@ class RearObservation:
     right_point_count: int
     scan_valid: bool
     rear_axis_min_distance: Optional[float]
-    exit_reference_visible: bool
     bundle1: Optional[np.ndarray]
     bundle2: Optional[np.ndarray]
     bundle1_visible: bool
@@ -89,7 +86,7 @@ class ParkingNodeOsy(Node):
         self.declare_parameter('motor_topic', '/motor_control')
         self.declare_parameter('control_hz', 20.0)
         self.declare_parameter('scan_timeout_sec', 0.5)
-        self.declare_parameter('scan_quality_min_points', 30)
+        self.declare_parameter('scan_quality_min_points', 10)
         self.declare_parameter('invalid_scan_confirm_frames', 5)
         self.declare_parameter('debug_view', True)
         self.declare_parameter('debug_window_name', 'parking_lidar_sequence_debug')
@@ -103,7 +100,7 @@ class ParkingNodeOsy(Node):
         self.declare_parameter('parking_min_range_m', 0.15)
         # 2.0m 안의 차량 흔적만 주차 판단에 사용한다.
         self.declare_parameter('cluster_max_range_m', 2.5)
-        self.declare_parameter('cluster_join_distance_m', 0.18)
+        self.declare_parameter('cluster_join_distance_m', 0.5)
         self.declare_parameter('cluster_min_points', 5)
         # Region-growing radius: points close to any point already in a car
         # bundle are recursively absorbed, so elongated/elliptic traces stay
@@ -111,58 +108,30 @@ class ParkingNodeOsy(Node):
         self.declare_parameter('vehicle_bundle_neighbor_distance_m', 0.22)
         # A handful of isolated reflections must not become B1/B2.  The bag
         # contains 10~19 point fragments around the actual vehicle traces.
-        self.declare_parameter('vehicle_bundle_min_points', 20)
+        self.declare_parameter('vehicle_bundle_min_points', 10)
         # Ignore one valid side completely unless it has this many returns.
         self.declare_parameter('valid_side_min_points', 30)
-        # During post-parking forward exit, watch only the visible left/right
-        # slot edges around ±80 deg; rear ±180 deg is not an exit reference.
-        self.declare_parameter('exit_reference_angle_deg', 80.0)
-        self.declare_parameter('exit_reference_angle_tolerance_deg', 10.0)
-        self.declare_parameter('exit_reference_min_points', 3)
-        self.declare_parameter('exit_reference_clear_frames', 3)
         self.declare_parameter('right_empty_confirm_sec', 0.5)
         self.declare_parameter('right_entry_confirm_frames', 3)
         self.declare_parameter('reverse_pair_confirm_frames', 3)
-        self.declare_parameter('b2_left_confirm_frames', 3)
+        self.declare_parameter('reverse_b2_turnaround_epsilon_m', 0.01)
+        self.declare_parameter('reverse_b2_turnaround_max_distance_m', 0.9)
         self.declare_parameter('b2_left_track_max_jump_m', 1.80)
-        self.declare_parameter('parking_empty_confirm_frames', 5)
         self.declare_parameter('bundle_track_max_jump_m', 0.65)
-        # At balance entry B1 is the original RIGHT trace and B2 has crossed
-        # to LEFT.  Keep a small dead-zone around the centre line so that
-        # identities cannot swap while a trace passes through it.
-        self.declare_parameter('balance_track_side_margin_m', 0.10)
 
         # Motion signs are hardware dependent.  Per request, entry/exit turn
         # defaults are right turn; tune these values on the vehicle.
         self.declare_parameter('forward_speed', 110)
-        self.declare_parameter('reverse_speed', -110)
-        self.declare_parameter('balance_reverse_speed', -100)
+        self.declare_parameter('reverse_speed', -100)
         self.declare_parameter('right_turn_steer', 45)
         self.declare_parameter('pre_reverse_left_steer', -45)
         self.declare_parameter('steer_settle_sec', 0.60)
-        self.declare_parameter('pass_second_car_sec', 2.0)
+        self.declare_parameter('pass_second_car_sec', 2.5)
         self.declare_parameter('approach_timeout_sec', 30.0)
         self.declare_parameter('reverse_seek_timeout_sec', 10.0)
-        self.declare_parameter('reverse_balance_timeout_sec', 15.0)
         self.declare_parameter('park_stop_sec', 1.0)
-        self.declare_parameter('exit_min_straight_sec', 0.80)
-        self.declare_parameter('exit_straight_timeout_sec', 3.0)
-        self.declare_parameter('exit_right_turn_sec', 5.0)
-        self.declare_parameter('exit_forward_sec', 4.0)
-
-        # Fine alignment: target left/right distance equality.  The sign is
-        # exposed because reverse steering direction differs between vehicles.
-        self.declare_parameter('balance_steer_kp', 100.0)
-        self.declare_parameter('balance_steer_sign', 1.0)
-        self.declare_parameter('balance_max_steer', 45)
-        # Reverse-balance steering is centered at neutral.  The LiDAR
-        # distance error alone selects both the direction and magnitude.
-        self.declare_parameter('balance_base_steer', 0)
-        self.declare_parameter('balance_max_correction', 90)
-        self.declare_parameter('balance_allow_left_steer', True)
-        self.declare_parameter('balance_distance_filter_alpha', 0.35)
-        self.declare_parameter('balance_error_deadband_m', 0.04)
-        self.declare_parameter('balance_max_steer_step', 8)
+        self.declare_parameter('exit_right_turn_sec', 10.0)
+        self.declare_parameter('exit_forward_sec', 8.0)
 
         self.scan_topic = str(self.get_parameter('scan_topic').value)
         self.motor_topic = str(self.get_parameter('motor_topic').value)
@@ -203,18 +172,6 @@ class ParkingNodeOsy(Node):
         self.valid_side_min_points = int(
             self.get_parameter('valid_side_min_points').value
         )
-        self.exit_reference_angle_tolerance = math.radians(float(
-            self.get_parameter('exit_reference_angle_tolerance_deg').value
-        ))
-        self.exit_reference_angle = math.radians(float(
-            self.get_parameter('exit_reference_angle_deg').value
-        ))
-        self.exit_reference_min_points = int(
-            self.get_parameter('exit_reference_min_points').value
-        )
-        self.exit_reference_clear_frames = int(
-            self.get_parameter('exit_reference_clear_frames').value
-        )
         self.right_empty_confirm_sec = float(
             self.get_parameter('right_empty_confirm_sec').value
         )
@@ -224,26 +181,21 @@ class ParkingNodeOsy(Node):
         self.reverse_pair_confirm_frames = int(
             self.get_parameter('reverse_pair_confirm_frames').value
         )
-        self.b2_left_confirm_frames = int(
-            self.get_parameter('b2_left_confirm_frames').value
-        )
+        self.reverse_b2_turnaround_epsilon = float(max(
+            0.0, self.get_parameter('reverse_b2_turnaround_epsilon_m').value
+        ))
+        self.reverse_b2_turnaround_max_distance = float(max(
+            0.0,
+            self.get_parameter('reverse_b2_turnaround_max_distance_m').value,
+        ))
         self.b2_left_track_max_jump = float(
             self.get_parameter('b2_left_track_max_jump_m').value
-        )
-        self.parking_empty_confirm_frames = int(
-            self.get_parameter('parking_empty_confirm_frames').value
         )
         self.bundle_track_max_jump = float(
             self.get_parameter('bundle_track_max_jump_m').value
         )
-        self.balance_track_side_margin = float(max(
-            0.0, self.get_parameter('balance_track_side_margin_m').value
-        ))
         self.forward_speed = int(self.get_parameter('forward_speed').value)
         self.reverse_speed = int(self.get_parameter('reverse_speed').value)
-        self.balance_reverse_speed = int(
-            self.get_parameter('balance_reverse_speed').value
-        )
         self.right_turn_steer = int(self.get_parameter('right_turn_steer').value)
         self.pre_reverse_left_steer = int(
             self.get_parameter('pre_reverse_left_steer').value
@@ -258,43 +210,11 @@ class ParkingNodeOsy(Node):
         self.reverse_seek_timeout_sec = float(
             self.get_parameter('reverse_seek_timeout_sec').value
         )
-        self.reverse_balance_timeout_sec = float(
-            self.get_parameter('reverse_balance_timeout_sec').value
-        )
         self.park_stop_sec = float(self.get_parameter('park_stop_sec').value)
-        self.exit_min_straight_sec = float(
-            self.get_parameter('exit_min_straight_sec').value
-        )
-        self.exit_straight_timeout_sec = float(
-            self.get_parameter('exit_straight_timeout_sec').value
-        )
         self.exit_right_turn_sec = float(
             self.get_parameter('exit_right_turn_sec').value
         )
         self.exit_forward_sec = float(self.get_parameter('exit_forward_sec').value)
-        self.balance_steer_kp = float(self.get_parameter('balance_steer_kp').value)
-        self.balance_steer_sign = float(self.get_parameter('balance_steer_sign').value)
-        self.balance_max_steer = int(self.get_parameter('balance_max_steer').value)
-        self.balance_base_steer = int(np.clip(
-            self.get_parameter('balance_base_steer').value,
-            -self.balance_max_steer,
-            self.balance_max_steer,
-        ))
-        self.balance_max_correction = int(max(
-            0, self.get_parameter('balance_max_correction').value
-        ))
-        self.balance_allow_left_steer = bool(
-            self.get_parameter('balance_allow_left_steer').value
-        )
-        self.balance_distance_filter_alpha = float(np.clip(
-            self.get_parameter('balance_distance_filter_alpha').value, 0.0, 1.0
-        ))
-        self.balance_error_deadband = float(
-            self.get_parameter('balance_error_deadband_m').value
-        )
-        self.balance_max_steer_step = max(
-            1, int(self.get_parameter('balance_max_steer_step').value)
-        )
 
         # LiDAR 드라이버가 기동되어 첫 /scan을 내보낼 때까지는 emergency가 아닌
         # 안전 정지 대기 상태로 유지한다.
@@ -302,7 +222,7 @@ class ParkingNodeOsy(Node):
         self.state_started_at = time.monotonic()
         self.last_scan_at: Optional[float] = None
         self.observation = RearObservation(
-            [], [], [], [], 0, 0, False, None, False,
+            [], [], [], [], 0, 0, False, None,
             None, None, False, False, None, None,
         )
         self.invalid_scan_count = 0
@@ -310,17 +230,15 @@ class ParkingNodeOsy(Node):
         self.right_empty_since: Optional[float] = None
         self.right_entry_frames = 0
         self.right_two_bundles_seen = False
-        self.exit_reference_clear_count = 0
-        self.exit_reference_seen = False
         self.reverse_pair_confirm_count = 0
         self.reverse_pair_confirmed = False
-        self.b2_left_confirm_count = 0
-        self.parking_empty_count = 0
+        self.reverse_b2_min_distance: Optional[float] = None
+        self.reverse_b2_has_approached = False
+        self.reverse_b2_turnaround_detected = False
         self.bundle_track_centroids: list[Optional[np.ndarray]] = [None, None]
         self.bundle_track_distances: list[Optional[float]] = [None, None]
         self.reverse_primary_seed_centroid: Optional[np.ndarray] = None
         self.reverse_primary_seed_distance: Optional[float] = None
-        self.last_balance_steer = self.balance_base_steer
         self.last_command = (0, 0)
 
         self.motor_pub = self.create_publisher(Int16MultiArray, self.motor_topic, 10)
@@ -346,7 +264,7 @@ class ParkingNodeOsy(Node):
         self.invalid_scan_count = 0
         self.observation = observation
 
-        if self.state in (ParkingState.REVERSE_HARD_RIGHT, ParkingState.REVERSE_BALANCE):
+        if self.state == ParkingState.REVERSE_HARD_RIGHT:
             self.update_bundle_tracks(self.observation.vehicle_bundles)
         else:
             self.clear_observation_tracks()
@@ -382,56 +300,45 @@ class ParkingNodeOsy(Node):
                 )
                 if self.reverse_pair_confirm_count >= self.reverse_pair_confirm_frames:
                     self.reverse_pair_confirmed = True
-                    self.b2_left_confirm_count = 0
+                    self.reverse_b2_min_distance = None
+                    self.reverse_b2_has_approached = False
+                    self.reverse_b2_turnaround_detected = False
                     self.get_logger().info(
-                        'Reverse B1/B2 acquired on RIGHT; waiting for B2 to enter LEFT'
+                        'Reverse B1/B2 acquired on RIGHT; waiting for B2 turnaround'
                     )
             else:
-                b2_is_left = (
-                    self.observation.bundle1 is not None
-                    and self.observation.bundle2 is not None
-                    and float(self.bundle_centroid(self.observation.bundle1)[1])
-                    < -self.balance_track_side_margin
-                    and float(self.bundle_centroid(self.observation.bundle2)[1])
-                    > self.balance_track_side_margin
-                    and self.observation.two_vehicle_bundles_visible
-                )
-                self.b2_left_confirm_count = (
-                    self.b2_left_confirm_count + 1 if b2_is_left else 0
-                )
+                bundle2 = self.observation.bundle2
+                if bundle2 is not None:
+                    distance = self.bundle_distance(bundle2)
+                    if self.reverse_b2_min_distance is None:
+                        self.reverse_b2_min_distance = distance
+                    elif distance < (
+                        self.reverse_b2_min_distance
+                        - self.reverse_b2_turnaround_epsilon
+                    ):
+                        self.reverse_b2_min_distance = distance
+                        self.reverse_b2_has_approached = (
+                            distance <= self.reverse_b2_turnaround_max_distance
+                        )
+                    elif (self.reverse_b2_has_approached
+                            and self.reverse_b2_min_distance
+                            <= self.reverse_b2_turnaround_max_distance
+                            and distance > (
+                                self.reverse_b2_min_distance
+                                + self.reverse_b2_turnaround_epsilon
+                            )):
+                        self.reverse_b2_turnaround_detected = True
         else:
             self.reverse_pair_confirm_count = 0
-            self.b2_left_confirm_count = 0
-
-        if self.state == ParkingState.REVERSE_BALANCE:
-            self.parking_empty_count = (
-                self.parking_empty_count + 1
-                if self.observation.vehicle_bundle_count == 0 else 0
-            )
-            if self.balance_pair_geometry_valid():
-                self.update_balance_steer()
-        else:
-            self.parking_empty_count = 0
-
-        if self.state == ParkingState.EXIT_STRAIGHT:
-            if self.observation.exit_reference_visible:
-                self.exit_reference_seen = True
-            if now - self.state_started_at >= self.exit_min_straight_sec:
-                self.exit_reference_clear_count = (
-                    0 if self.observation.exit_reference_visible
-                    else self.exit_reference_clear_count + 1
-                )
-            else:
-                self.exit_reference_clear_count = 0
-        else:
-            self.exit_reference_clear_count = 0
+            self.reverse_b2_min_distance = None
+            self.reverse_b2_has_approached = False
+            self.reverse_b2_turnaround_detected = False
 
     def observe_rear_car_bundles(self, msg: LaserScan) -> RearObservation:
         """Cluster the |angle| >= 70-degree field, split into LEFT and RIGHT."""
         left_ordered_points: list[tuple[float, float]] = []
         right_ordered_points: list[tuple[float, float]] = []
         valid_scan_points = 0
-        exit_reference_points = 0
         rear_axis_distances: list[float] = []
         for index, distance in enumerate(msg.ranges):
             if not math.isfinite(distance):
@@ -445,11 +352,7 @@ class ParkingNodeOsy(Node):
                 continue
             angle = msg.angle_min + index * msg.angle_increment
             angle = math.atan2(math.sin(angle), math.cos(angle))
-            # References for the post-parking straight exit: the visible
-            # left/right slot edges (±80°), not the rear axis.
             abs_angle = abs(angle)
-            if abs(abs_angle - self.exit_reference_angle) <= self.exit_reference_angle_tolerance:
-                exit_reference_points += 1
             if abs(abs_angle - math.pi) <= self.rear_hard_stop_angle:
                 rear_axis_distances.append(float(distance))
             if abs(angle) < self.valid_sector_min_abs:
@@ -487,7 +390,6 @@ class ParkingNodeOsy(Node):
             left_point_count, right_point_count,
             valid_scan_points >= self.scan_quality_min_points,
             rear_axis_min_distance,
-            exit_reference_points >= self.exit_reference_min_points,
             None, None, False, False, None, None,
         )
 
@@ -556,11 +458,11 @@ class ParkingNodeOsy(Node):
     def reset_bundle_tracking(self) -> None:
         self.bundle_track_centroids = [None, None]
         self.bundle_track_distances = [None, None]
-        self.last_balance_steer = self.balance_base_steer
         self.reverse_pair_confirm_count = 0
         self.reverse_pair_confirmed = False
-        self.b2_left_confirm_count = 0
-        self.parking_empty_count = 0
+        self.reverse_b2_min_distance = None
+        self.reverse_b2_has_approached = False
+        self.reverse_b2_turnaround_detected = False
         self.clear_observation_tracks()
 
     def capture_reverse_primary_seed(self) -> None:
@@ -593,14 +495,6 @@ class ParkingNodeOsy(Node):
         if not candidates:
             return
         centroids = [self.bundle_centroid(bundle) for bundle in candidates]
-
-        def allowed_for_track(track_index: int, centroid: np.ndarray) -> bool:
-            """Keep B1/B2 identities on their expected sides in balance."""
-            if self.state != ParkingState.REVERSE_BALANCE:
-                return True
-            if track_index == 0:  # B1: original RIGHT trace
-                return float(centroid[1]) < -self.balance_track_side_margin
-            return float(centroid[1]) > self.balance_track_side_margin
 
         assignments: dict[int, int] = {}
         if self.bundle_track_centroids[0] is None:
@@ -657,9 +551,6 @@ class ParkingNodeOsy(Node):
                 for second in range(len(candidates)):
                     if first == second:
                         continue
-                    if (not allowed_for_track(0, centroids[first])
-                            or not allowed_for_track(1, centroids[second])):
-                        continue
                     first_jump = float(np.linalg.norm(
                         centroids[first] - self.bundle_track_centroids[0]
                     ))
@@ -687,8 +578,6 @@ class ParkingNodeOsy(Node):
                 if self.bundle_track_centroids[track_index] is None:
                     continue
                 for candidate_index, centroid in enumerate(centroids):
-                    if not allowed_for_track(track_index, centroid):
-                        continue
                     jump = float(np.linalg.norm(
                         centroid - self.bundle_track_centroids[track_index]
                     ))
@@ -705,64 +594,16 @@ class ParkingNodeOsy(Node):
 
         for track_index, candidate_index in assignments.items():
             bundle = candidates[candidate_index]
-            raw_distance = self.bundle_distance(bundle)
-            previous_distance = self.bundle_track_distances[track_index]
-            filtered_distance = raw_distance if previous_distance is None else (
-                self.balance_distance_filter_alpha * raw_distance
-                + (1.0 - self.balance_distance_filter_alpha) * previous_distance
-            )
             self.bundle_track_centroids[track_index] = centroids[candidate_index]
-            self.bundle_track_distances[track_index] = filtered_distance
+            self.bundle_track_distances[track_index] = self.bundle_distance(bundle)
             if track_index == 0:
                 self.observation.bundle1 = bundle
                 self.observation.bundle1_visible = True
-                self.observation.bundle1_distance = filtered_distance
+                self.observation.bundle1_distance = self.bundle_track_distances[0]
             else:
                 self.observation.bundle2 = bundle
                 self.observation.bundle2_visible = True
-                self.observation.bundle2_distance = filtered_distance
-
-    def balance_pair_geometry_valid(self) -> bool:
-        """Use balance measurements only for the physically valid B1/B2 pair."""
-        bundle1 = self.observation.bundle1
-        bundle2 = self.observation.bundle2
-        if bundle1 is None or bundle2 is None:
-            return False
-        center1 = self.bundle_centroid(bundle1)
-        center2 = self.bundle_centroid(bundle2)
-        return (
-            float(center1[1]) < -self.balance_track_side_margin
-            and float(center2[1]) > self.balance_track_side_margin
-        )
-
-    def update_balance_steer(self) -> None:
-        """Update filtered, deadbanded and rate-limited steering once per scan."""
-        bundle1 = self.observation.bundle1_distance
-        bundle2 = self.observation.bundle2_distance
-        if bundle1 is None or bundle2 is None:
-            return
-        error = bundle1 - bundle2
-        correction = 0 if abs(error) <= self.balance_error_deadband else int(np.clip(
-            self.balance_steer_sign * self.balance_steer_kp * error,
-            -self.balance_max_correction,
-            self.balance_max_correction,
-        ))
-        lower_limit = -self.balance_max_steer if self.balance_allow_left_steer else 0
-        target = int(np.clip(
-            self.balance_base_steer + correction,
-            lower_limit,
-            self.balance_max_steer,
-        ))
-        delta = int(np.clip(
-            target - self.last_balance_steer,
-            -self.balance_max_steer_step,
-            self.balance_max_steer_step,
-        ))
-        self.last_balance_steer = int(np.clip(
-            self.last_balance_steer + delta,
-            lower_limit,
-            self.balance_max_steer,
-        ))
+                self.observation.bundle2_distance = self.bundle_track_distances[1]
 
     def transition(self, next_state: ParkingState, now: float) -> None:
         if self.state != next_state:
@@ -775,11 +616,6 @@ class ParkingNodeOsy(Node):
                 self.capture_reverse_primary_seed()
             elif next_state == ParkingState.REVERSE_HARD_RIGHT:
                 self.reset_bundle_tracking()
-            elif next_state == ParkingState.REVERSE_BALANCE:
-                self.parking_empty_count = 0
-            elif next_state == ParkingState.EXIT_STRAIGHT:
-                self.exit_reference_clear_count = 0
-                self.exit_reference_seen = False
 
     def control_tick(self) -> None:
         now = time.monotonic()
@@ -802,7 +638,7 @@ class ParkingNodeOsy(Node):
         elapsed = now - self.state_started_at
         right_visible = self.observation.right_visible
 
-        if (self.state in (ParkingState.REVERSE_HARD_RIGHT, ParkingState.REVERSE_BALANCE)
+        if (self.state == ParkingState.REVERSE_HARD_RIGHT
                 and self.observation.rear_axis_min_distance is not None
                 and self.observation.rear_axis_min_distance <= self.rear_hard_stop_distance):
             self.get_logger().error('Emergency stop: rear obstacle too close')
@@ -872,16 +708,16 @@ class ParkingNodeOsy(Node):
             return
 
         if self.state == ParkingState.REVERSE_HARD_RIGHT:
-            # Keep hard-coded reverse after RIGHT B1/B2 acquisition until the
-            # tracked B2 crosses into LEFT.  Only then begin fine alignment.
+            # Keep hard-coded reverse until B2 approached the vehicle and
+            # then starts moving away again (its center-distance turnaround).
             if (self.reverse_pair_confirmed
-                    and self.b2_left_confirm_count >= self.b2_left_confirm_frames):
-                self.transition(ParkingState.REVERSE_BALANCE, now)
-                self.publish(self.last_balance_steer, self.balance_reverse_speed)
+                    and self.reverse_b2_turnaround_detected):
+                self.transition(ParkingState.PARK_STOP, now)
+                self.publish(0, 0)
                 return
             elif elapsed >= self.reverse_seek_timeout_sec:
                 self.get_logger().error(
-                    'Parking failed: B1/B2 acquisition or B2 LEFT crossing timed out'
+                    'Parking failed: B1/B2 acquisition or centering timed out'
                 )
                 self.transition(ParkingState.PARKING_FAILED, now)
                 self.publish(0, 0)
@@ -889,42 +725,10 @@ class ParkingNodeOsy(Node):
             self.publish(self.right_turn_steer, self.reverse_speed)
             return
 
-        if self.state == ParkingState.REVERSE_BALANCE:
-            if self.parking_empty_count >= self.parking_empty_confirm_frames:
-                self.transition(ParkingState.PARK_STOP, now)
-                self.publish(0, 0)
-            elif elapsed >= self.reverse_balance_timeout_sec:
-                self.get_logger().error('Parking failed: reverse alignment timeout')
-                self.transition(ParkingState.PARKING_FAILED, now)
-                self.publish(0, 0)
-            else:
-                # With one temporarily missing bundle, retain the last limited
-                # steering.  Parking completes only after zero bundles on new
-                # scans for the configured confirmation count.
-                self.publish(self.last_balance_steer, self.balance_reverse_speed)
-            return
-
         if self.state == ParkingState.PARK_STOP:
             if elapsed >= self.park_stop_sec:
-                self.transition(ParkingState.EXIT_STRAIGHT, now)
-            self.publish(0, 0)
-            return
-
-        if self.state == ParkingState.EXIT_STRAIGHT:
-            # Leave the slot straight.  When side/rear reference points near
-            # ±80° side-edge references disappear, perform the hard-coded
-            # 90° right turn.
-            if (elapsed >= self.exit_min_straight_sec
-                    and self.exit_reference_seen
-                    and self.exit_reference_clear_count >= self.exit_reference_clear_frames):
                 self.transition(ParkingState.EXIT_SET_RIGHT_STEER, now)
-                self.publish(self.right_turn_steer, 0)
-            elif elapsed >= self.exit_straight_timeout_sec:
-                self.get_logger().error('Parking exit failed: reference points never cleared')
-                self.transition(ParkingState.PARKING_FAILED, now)
-                self.publish(0, 0)
-            else:
-                self.publish(0, self.forward_speed)
+            self.publish(0, 0)
             return
 
         if self.state == ParkingState.EXIT_SET_RIGHT_STEER:
@@ -1026,8 +830,8 @@ class ParkingNodeOsy(Node):
             ParkingState.WAIT_CAR2_ENTRY,
             ParkingState.PASS_SECOND_CAR,
             ParkingState.SET_REVERSE_STEER, ParkingState.REVERSE_HARD_RIGHT,
-            ParkingState.REVERSE_BALANCE, ParkingState.PARK_STOP,
-            ParkingState.EXIT_STRAIGHT, ParkingState.EXIT_SET_RIGHT_STEER,
+            ParkingState.PARK_STOP,
+            ParkingState.EXIT_SET_RIGHT_STEER,
             ParkingState.EXIT_RIGHT_TURN, ParkingState.EXIT_FORWARD,
             ParkingState.DONE, ParkingState.PARKING_FAILED,
         ]
@@ -1039,14 +843,13 @@ class ParkingNodeOsy(Node):
         right_stage = 'pair-seen' if self.right_two_bundles_seen else 'waiting-pair'
         cv2.putText(image, f'cars={self.observation.vehicle_bundle_count} right-cars={self.observation.right_bundle_count} raw L/R={self.observation.left_point_count}/{self.observation.right_point_count} ({right_stage}) B1={bundle1} B2={bundle2}',
                     (18, 64), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 1, cv2.LINE_AA)
-        exit_ref = 'seen' if self.observation.exit_reference_visible else 'clear'
-        exit_angle_deg = math.degrees(self.exit_reference_angle)
-        cv2.putText(image, f'exit ref ±{exit_angle_deg:.0f}: {exit_ref}, ever_seen={self.exit_reference_seen}, clear scans={self.exit_reference_clear_count}',
-                    (18, 88), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 1, cv2.LINE_AA)
         pair_state = 'ready' if self.reverse_pair_confirmed else (
             f'{self.reverse_pair_confirm_count}/{self.reverse_pair_confirm_frames}'
         )
-        cv2.putText(image, f'cmd: steer={self.last_command[0]}, speed={self.last_command[1]} pair={pair_state} B2-left={self.b2_left_confirm_count}/{self.b2_left_confirm_frames} empty={self.parking_empty_count}/{self.parking_empty_confirm_frames}',
+        b2_turn = 'detected' if self.reverse_b2_turnaround_detected else (
+            'approaching' if self.reverse_b2_has_approached else 'waiting'
+        )
+        cv2.putText(image, f'cmd: steer={self.last_command[0]}, speed={self.last_command[1]} pair={pair_state} B2-turn={b2_turn}',
                     (18, 112), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 1, cv2.LINE_AA)
         for index, step in enumerate(steps):
             col, row = index % 2, index // 2
