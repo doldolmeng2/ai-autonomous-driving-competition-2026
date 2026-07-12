@@ -193,6 +193,8 @@ class CameraNode(Node):
         self.declare_parameter('pixel_format', 'YUYV')
         self.declare_parameter('auto_fallback_devices', True)
         self.declare_parameter('required_name_substring', 'C920')
+        self.declare_parameter('enable_high', True)
+        self.declare_parameter('enable_low', True)
 
         for side, device in (('high', '/dev/video4'), ('low', '/dev/video6')):
             self.declare_parameter(f'{side}.device', device)
@@ -209,7 +211,12 @@ class CameraNode(Node):
 
         used_devices = set()
         self.camera_publishers = []
-        for side in ('high', 'low'):
+        enabled_sides = []
+        if bool(self.get_parameter('enable_high').value):
+            enabled_sides.append('high')
+        if bool(self.get_parameter('enable_low').value):
+            enabled_sides.append('low')
+        for side in enabled_sides:
             preferred = self.get_parameter(f'{side}.device').value
             device = self.resolve_device(side, preferred, used_devices)
             if device:
