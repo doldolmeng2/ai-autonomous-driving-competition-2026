@@ -1,45 +1,20 @@
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription
-from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 from pathlib import Path
 
 
 def generate_launch_description():
+    """Viewer-only launch.
+
+    Sensor drivers are owned by ``sensor_topic/sensors.launch.py``.  Starting
+    them here too opens the same camera, serial, and LiDAR devices twice.
+    """
     share = Path(get_package_share_directory('sensor_topic'))
-    sllidar_share = Path(get_package_share_directory('sllidar_ros2'))
     return LaunchDescription([
-        Node(
-            package='sensor_topic',
-            executable='camera_node',
-            output='screen',
-            parameters=[str(share / 'config' / 'camera.yaml')],
-        ),
-        IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(
-                str(sllidar_share / 'launch' / 'sllidar_a1_launch.py')
-            ),
-            launch_arguments={
-                'serial_port': '/dev/ttyUSB0',
-                'serial_baudrate': '115200',
-                'frame_id': 'laser',
-            }.items(),
-        ),
-        Node(
-            package='sensor_topic',
-            executable='controller_node',
-            output='screen',
-            parameters=[str(share / 'config' / 'controller.yaml')],
-        ),
+        # All nodes below only subscribe to already-published sensor topics.
         Node(package='sensor_utils', executable='camera_viewer_node', output='screen'),
         Node(package='sensor_utils', executable='lidar_viewer_node', output='screen'),
-        Node(
-            package='sensor_topic',
-            executable='ultrasonic_node',
-            output='screen',
-            parameters=[str(share / 'config' / 'ultrasonic.yaml')],
-        ),
         Node(
             package='sensor_utils',
             executable='ultrasonic_viewer_node',

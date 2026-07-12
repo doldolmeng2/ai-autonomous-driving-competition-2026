@@ -10,7 +10,7 @@ ULTRASONIC_TOPICS = [f'/ultrasonic/range_{index}' for index in range(1, 7)]
 LANE_OFFSET_TOPIC = '/lane_offset'
 LANE_INFO_TOPIC = '/lane_info'
 MOTOR_CONTROL_TOPIC = '/motor_control'
-BASE_SPEED = 30
+BASE_SPEED = 120
 MAX_STEER = 45
 DEFAULT_LANE_NUMBER = 2
 

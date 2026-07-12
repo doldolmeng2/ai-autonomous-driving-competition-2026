@@ -13,6 +13,8 @@ class CameraViewerNode(Node):
         super().__init__('camera_viewer_node')
         self.declare_parameter('high_image_topic', '/camera/high/image_raw')
         self.declare_parameter('low_image_topic', '/camera/low/image_raw')
+        self.declare_parameter('deprecated_left_image_topic', '/camera/left/image_raw')
+        self.declare_parameter('deprecated_right_image_topic', '/camera/right/image_raw')
         self.declare_parameter('window_prefix', 'camera')
 
         qos = QoSProfile(
@@ -31,6 +33,18 @@ class CameraViewerNode(Node):
             Image,
             self.get_parameter('low_image_topic').value,
             lambda msg: self.show_image('low', msg),
+            qos,
+        )
+        self.create_subscription(
+            Image,
+            self.get_parameter('deprecated_left_image_topic').value,
+            lambda msg: self.show_image('deprecated_left', msg),
+            qos,
+        )
+        self.create_subscription(
+            Image,
+            self.get_parameter('deprecated_right_image_topic').value,
+            lambda msg: self.show_image('deprecated_right', msg),
             qos,
         )
         self.timer = self.create_timer(0.03, lambda: cv2.waitKey(1))

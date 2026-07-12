@@ -6,7 +6,7 @@ from launch.actions import ExecuteProcess, LogInfo
 from launch_ros.actions import Node
 
 
-BAG_DIR = '/home/gill/bags'
+BAG_DIR = '/home/hailab/osy/260711/ai-autonomous-driving-competition-2026'
 
 
 def find_bags(bag_dir):

@@ -14,14 +14,19 @@ class LidarViewerNode(Node):
         super().__init__('lidar_viewer_node')
         self.declare_parameter('scan_topic', '/scan')
         self.declare_parameter('window_name', 'lidar_radar')
-        self.declare_parameter('max_range_m', 8.0)
+        # 가까운 주차 장애물을 크게 보기 위한 시각화 최대 거리.
+        self.declare_parameter('max_range_m', 2.0)
         self.declare_parameter('image_size', 800)
         self.declare_parameter('range_ring_step_m', 1.0)
+        self.declare_parameter('rear_quadrants_only', True)
 
         self.window_name = self.get_parameter('window_name').value
         self.max_range = float(self.get_parameter('max_range_m').value)
         self.image_size = int(self.get_parameter('image_size').value)
         self.ring_step = float(self.get_parameter('range_ring_step_m').value)
+        self.rear_quadrants_only = bool(
+            self.get_parameter('rear_quadrants_only').value
+        )
         self.latest_scan = None
 
         self.create_subscription(
@@ -84,7 +89,7 @@ class LidarViewerNode(Node):
 
         cv2.putText(
             image,
-            '0 deg = FRONT, angle increases counter-clockwise',
+            '0 deg = FRONT, + = LEFT, - = RIGHT',
             (25, size - 25),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6,
@@ -101,7 +106,7 @@ class LidarViewerNode(Node):
         label_color = (0, 220, 220)
         radius = int(size * 0.45)
 
-        # 0 deg is vehicle front. Positive angles rotate counter-clockwise.
+        # 0 deg is vehicle front. Positive angles point vehicle-left.
         bearings = [
             (0, '0 deg FRONT', (center + 12, center - radius + 24)),
             (90, '+90 deg LEFT', (center - radius + 18, center - 14)),
@@ -149,7 +154,7 @@ class LidarViewerNode(Node):
         )
         cv2.putText(
             image,
-            'CCW +',
+            '+ LEFT',
             (center - 95, center - 82),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.5,
@@ -168,6 +173,10 @@ class LidarViewerNode(Node):
 
             angle = msg.angle_min + index * msg.angle_increment
             angle = math.atan2(math.sin(angle), math.cos(angle))
+            # Parking uses rear quadrants 3/4 only; hide front quadrants 1/2
+            # in the viewer as well so the displayed data matches control.
+            if self.rear_quadrants_only and abs(angle) < math.pi / 2:
+                continue
             x = int(center - math.sin(angle) * distance * scale)
             y = int(center - math.cos(angle) * distance * scale)
             intensity = 120
