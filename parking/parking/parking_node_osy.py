@@ -1,18 +1,13 @@
-"""LiDAR-only perpendicular parking node.
+"""LiDAR-only parking controller: /scan -> /motor_control.
 
-Physical scan convention used by this node:
-    0 deg       : vehicle rear
-    +/-180 deg  : vehicle front
-    positive    : clockwise
-
-The rear LiDAR is occluded in scan quadrants 1 and 2, therefore only the
-[-180, 0] degree sector is used.  This implementation intentionally has only
-one input (/scan) and one output (/motor_control).
+Scan convention:
+    0 deg = vehicle front, + = vehicle left, - = vehicle right.
+Only rear quadrants 3 and 4 are used (|angle| >= 90 deg); points in front
+quadrants 1 and 2 are discarded before any parking decision is made.
 """
 
 from __future__ import annotations
 
-from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 import math
@@ -27,259 +22,205 @@ from std_msgs.msg import Int16MultiArray
 
 
 class ParkingState(str, Enum):
-    SEARCH = 'SEARCH'
-    APPROACH = 'APPROACH'
-    STEER_IN = 'STEER_IN'
-    REVERSE_ARC = 'REVERSE_ARC'
-    COUNTER_STEER = 'COUNTER_STEER'
-    REVERSE_ALIGN = 'REVERSE_ALIGN'
-    HOLD = 'HOLD'
-    EXIT_STRAIGHT = 'EXIT_STRAIGHT'
-    EXIT_TURN = 'EXIT_TURN'
+    SEARCH_TWO_CARS = 'SEARCH_TWO_CARS'
+    PASS_SECOND_CAR = 'PASS_SECOND_CAR'
+    SET_REVERSE_STEER = 'SET_REVERSE_STEER'
+    REVERSE_HARD_RIGHT = 'REVERSE_HARD_RIGHT'
+    REVERSE_BALANCE = 'REVERSE_BALANCE'
+    PARK_STOP = 'PARK_STOP'
+    FORWARD_BALANCE = 'FORWARD_BALANCE'
+    EXIT_RIGHT_TURN = 'EXIT_RIGHT_TURN'
+    EXIT_FORWARD = 'EXIT_FORWARD'
     DONE = 'DONE'
     EMERGENCY_STOP = 'EMERGENCY_STOP'
 
 
 @dataclass
-class SlotCandidate:
-    start_x: float
-    end_x: float
-    side_distance: float
+class RearObservation:
+    """Clusters and nearest left/right parked-car distances in rear quadrants."""
+
+    clusters: list[np.ndarray]
+    left_distance: Optional[float]
+    right_distance: Optional[float]
 
     @property
-    def center_x(self) -> float:
-        return 0.5 * (self.start_x + self.end_x)
+    def two_car_bundles(self) -> bool:
+        return len(self.clusters) >= 2
+
+    @property
+    def both_sides_visible(self) -> bool:
+        return self.left_distance is not None and self.right_distance is not None
 
 
 class ParkingNodeOsy(Node):
-    """Single-node LiDAR-only T-parking controller."""
+    """Hard-coded T-parking sequence with rear-quadrant LiDAR fine alignment."""
 
     def __init__(self) -> None:
         super().__init__('parking_node_osy')
 
-        # Topics: PDF-defined /scan input and /motor_control output only.
+        # This node deliberately has only one input and one output.
         self.declare_parameter('scan_topic', '/scan')
         self.declare_parameter('motor_topic', '/motor_control')
         self.declare_parameter('control_hz', 20.0)
-
-        # Sensor convention and usable rear-LiDAR sector.
-        self.declare_parameter('usable_angle_min_deg', -180.0)
-        self.declare_parameter('usable_angle_max_deg', 0.0)
-        self.declare_parameter('slot_side', 'right')  # right = y < 0
         self.declare_parameter('scan_timeout_sec', 0.5)
 
-        # Gap detector: parked car -> empty gap -> parked car.
-        self.declare_parameter('slot_x_min_m', -1.6)
-        self.declare_parameter('slot_x_max_m', 3.0)
-        self.declare_parameter('slot_side_min_m', 0.25)
-        self.declare_parameter('slot_side_max_m', 2.2)
-        self.declare_parameter('slot_bin_size_m', 0.08)
-        self.declare_parameter('slot_min_points_per_bin', 2)
-        self.declare_parameter('slot_min_vehicle_length_m', 0.24)
-        self.declare_parameter('slot_min_length_m', 0.65)
-        self.declare_parameter('slot_max_length_m', 1.35)
-        self.declare_parameter('slot_confirm_frames', 4)
+        # Use only rear quadrants 3 and 4: +90..+180 and -180..-90 deg.
+        self.declare_parameter('rear_sector_min_abs_deg', 90.0)
+        self.declare_parameter('cluster_max_range_m', 2.0)
+        self.declare_parameter('cluster_join_distance_m', 0.18)
+        self.declare_parameter('cluster_min_points', 5)
+        self.declare_parameter('two_car_confirm_frames', 4)
+        self.declare_parameter('bundle_missing_frames', 4)
 
-        # Motion and geometry. Signs must be verified on the real vehicle.
+        # Motion signs are hardware dependent.  Per request, entry/exit turn
+        # defaults are right turn; tune these values on the vehicle.
         self.declare_parameter('forward_speed', 22)
         self.declare_parameter('reverse_speed', -18)
-        self.declare_parameter('align_reverse_speed', -11)
-        self.declare_parameter('entry_steer', -45)
-        self.declare_parameter('exit_steer', 45)
-        self.declare_parameter('approach_pass_x_m', -0.20)
+        self.declare_parameter('balance_reverse_speed', -11)
+        self.declare_parameter('right_turn_steer', -45)
         self.declare_parameter('steer_settle_sec', 0.60)
-        self.declare_parameter('reverse_arc_sec', 2.40)
-        self.declare_parameter('counter_steer_sec', 0.60)
-        self.declare_parameter('align_timeout_sec', 5.0)
-        self.declare_parameter('rear_stop_distance_m', 0.18)
-        self.declare_parameter('side_hard_stop_distance_m', 0.16)
-        self.declare_parameter('side_target_distance_m', 0.42)
-        self.declare_parameter('side_steer_kp', 70.0)
-        self.declare_parameter('hold_sec', 2.0)
-        self.declare_parameter('exit_straight_sec', 1.2)
-        self.declare_parameter('exit_turn_sec', 1.2)
+        self.declare_parameter('pass_second_car_sec', 0.70)
+        self.declare_parameter('reverse_seek_timeout_sec', 5.0)
+        self.declare_parameter('park_stop_sec', 1.0)
+        self.declare_parameter('forward_seek_timeout_sec', 4.0)
+        self.declare_parameter('exit_right_turn_sec', 1.20)
+        self.declare_parameter('exit_forward_sec', 2.0)
+
+        # Fine alignment: target left/right distance equality.  The sign is
+        # exposed because reverse steering direction differs between vehicles.
+        self.declare_parameter('balance_steer_kp', 55.0)
+        self.declare_parameter('balance_steer_sign', 1.0)
+        self.declare_parameter('balance_max_steer', 20)
 
         self.scan_topic = str(self.get_parameter('scan_topic').value)
         self.motor_topic = str(self.get_parameter('motor_topic').value)
         self.control_hz = max(1.0, float(self.get_parameter('control_hz').value))
-        self.usable_min = math.radians(float(
-            self.get_parameter('usable_angle_min_deg').value
-        ))
-        self.usable_max = math.radians(float(
-            self.get_parameter('usable_angle_max_deg').value
-        ))
-        self.slot_side_sign = -1.0 if str(
-            self.get_parameter('slot_side').value
-        ).lower() == 'right' else 1.0
         self.scan_timeout_sec = float(self.get_parameter('scan_timeout_sec').value)
-
-        self.slot_x_min = float(self.get_parameter('slot_x_min_m').value)
-        self.slot_x_max = float(self.get_parameter('slot_x_max_m').value)
-        self.slot_side_min = float(self.get_parameter('slot_side_min_m').value)
-        self.slot_side_max = float(self.get_parameter('slot_side_max_m').value)
-        self.slot_bin_size = float(self.get_parameter('slot_bin_size_m').value)
-        self.slot_min_points = int(self.get_parameter('slot_min_points_per_bin').value)
-        self.slot_min_vehicle_length = float(
-            self.get_parameter('slot_min_vehicle_length_m').value
+        self.rear_sector_min_abs = math.radians(float(
+            self.get_parameter('rear_sector_min_abs_deg').value
+        ))
+        self.cluster_max_range = float(self.get_parameter('cluster_max_range_m').value)
+        self.cluster_join_distance = float(
+            self.get_parameter('cluster_join_distance_m').value
         )
-        self.slot_min_length = float(self.get_parameter('slot_min_length_m').value)
-        self.slot_max_length = float(self.get_parameter('slot_max_length_m').value)
-        self.slot_confirm_frames = int(self.get_parameter('slot_confirm_frames').value)
-
+        self.cluster_min_points = int(self.get_parameter('cluster_min_points').value)
+        self.two_car_confirm_frames = int(
+            self.get_parameter('two_car_confirm_frames').value
+        )
+        self.bundle_missing_frames = int(
+            self.get_parameter('bundle_missing_frames').value
+        )
         self.forward_speed = int(self.get_parameter('forward_speed').value)
         self.reverse_speed = int(self.get_parameter('reverse_speed').value)
-        self.align_reverse_speed = int(
-            self.get_parameter('align_reverse_speed').value
+        self.balance_reverse_speed = int(
+            self.get_parameter('balance_reverse_speed').value
         )
-        self.entry_steer = int(self.get_parameter('entry_steer').value)
-        self.exit_steer = int(self.get_parameter('exit_steer').value)
-        self.approach_pass_x = float(self.get_parameter('approach_pass_x_m').value)
+        self.right_turn_steer = int(self.get_parameter('right_turn_steer').value)
         self.steer_settle_sec = float(self.get_parameter('steer_settle_sec').value)
-        self.reverse_arc_sec = float(self.get_parameter('reverse_arc_sec').value)
-        self.counter_steer_sec = float(
-            self.get_parameter('counter_steer_sec').value
+        self.pass_second_car_sec = float(
+            self.get_parameter('pass_second_car_sec').value
         )
-        self.align_timeout_sec = float(self.get_parameter('align_timeout_sec').value)
-        self.rear_stop_distance = float(
-            self.get_parameter('rear_stop_distance_m').value
+        self.reverse_seek_timeout_sec = float(
+            self.get_parameter('reverse_seek_timeout_sec').value
         )
-        self.side_hard_stop_distance = float(
-            self.get_parameter('side_hard_stop_distance_m').value
+        self.park_stop_sec = float(self.get_parameter('park_stop_sec').value)
+        self.forward_seek_timeout_sec = float(
+            self.get_parameter('forward_seek_timeout_sec').value
         )
-        self.side_target_distance = float(
-            self.get_parameter('side_target_distance_m').value
+        self.exit_right_turn_sec = float(
+            self.get_parameter('exit_right_turn_sec').value
         )
-        self.side_steer_kp = float(self.get_parameter('side_steer_kp').value)
-        self.hold_sec = float(self.get_parameter('hold_sec').value)
-        self.exit_straight_sec = float(
-            self.get_parameter('exit_straight_sec').value
-        )
-        self.exit_turn_sec = float(self.get_parameter('exit_turn_sec').value)
+        self.exit_forward_sec = float(self.get_parameter('exit_forward_sec').value)
+        self.balance_steer_kp = float(self.get_parameter('balance_steer_kp').value)
+        self.balance_steer_sign = float(self.get_parameter('balance_steer_sign').value)
+        self.balance_max_steer = int(self.get_parameter('balance_max_steer').value)
 
-        self.state = ParkingState.SEARCH
+        self.state = ParkingState.SEARCH_TWO_CARS
         self.state_started_at = time.monotonic()
-        self.latest_points = np.empty((0, 2), dtype=np.float64)
         self.last_scan_at: Optional[float] = None
-        self.slot_history: deque[SlotCandidate] = deque(maxlen=self.slot_confirm_frames)
-        self.locked_slot: Optional[SlotCandidate] = None
+        self.observation = RearObservation([], None, None)
+        self.two_car_frames = 0
+        self.missing_bundle_frames = 0
+        self.forward_bundles_seen = False
+        self.last_balance_steer = 0
 
         self.motor_pub = self.create_publisher(Int16MultiArray, self.motor_topic, 10)
         self.create_subscription(LaserScan, self.scan_topic, self.scan_callback, 10)
         self.create_timer(1.0 / self.control_hz, self.control_tick)
         self.get_logger().info(
-            'parking_node_osy ready: /scan -> /motor_control, '
-            f'usable angle={math.degrees(self.usable_min):.0f}..'
-            f'{math.degrees(self.usable_max):.0f} deg, '
-            f'slot_side={"right" if self.slot_side_sign < 0 else "left"}'
+            'parking_node_osy: LiDAR-only /scan -> /motor_control; '
+            'using rear quadrants 3/4 only (|angle| >= 90 deg)'
         )
 
     def scan_callback(self, msg: LaserScan) -> None:
-        self.latest_points = self.scan_to_vehicle_points(msg)
+        self.observation = self.observe_rear_car_bundles(msg)
         self.last_scan_at = time.monotonic()
 
-    def scan_to_vehicle_points(self, msg: LaserScan) -> np.ndarray:
-        """Convert the specified rear-LiDAR convention to vehicle x-forward/y-left."""
-        points = []
+    def observe_rear_car_bundles(self, msg: LaserScan) -> RearObservation:
+        """Cluster only rear-quadrant returns, discarding front quadrants 1/2."""
+        ordered_points: list[tuple[float, float]] = []
         for index, distance in enumerate(msg.ranges):
             if not math.isfinite(distance):
                 continue
-            if distance < msg.range_min or distance > msg.range_max:
+            if distance < msg.range_min or distance > min(msg.range_max, self.cluster_max_range):
                 continue
             angle = msg.angle_min + index * msg.angle_increment
             angle = math.atan2(math.sin(angle), math.cos(angle))
-            if not self.usable_min <= angle <= self.usable_max:
-                continue  # discard quadrants 1 and 2
-            # 0 deg points rear; positive angles rotate clockwise.
-            x_forward = -distance * math.cos(angle)
-            y_left = distance * math.sin(angle)
-            points.append((x_forward, y_left))
-        return np.asarray(points, dtype=np.float64) if points else np.empty((0, 2))
+            if abs(angle) < self.rear_sector_min_abs:
+                continue  # discard quadrants 1 and 2 completely
+            ordered_points.append((distance * math.cos(angle), distance * math.sin(angle)))
 
-    def detect_slot(self) -> Optional[SlotCandidate]:
-        points = self.latest_points
-        if points.shape[0] < 10:
-            return None
-        side_distance = points[:, 1] * self.slot_side_sign
-        mask = (
-            (points[:, 0] >= self.slot_x_min)
-            & (points[:, 0] <= self.slot_x_max)
-            & (side_distance >= self.slot_side_min)
-            & (side_distance <= self.slot_side_max)
-        )
-        side_points = points[mask]
-        if side_points.shape[0] < 10:
-            return None
+        clusters: list[np.ndarray] = []
+        current: list[tuple[float, float]] = []
+        previous: Optional[np.ndarray] = None
+        for point_tuple in ordered_points:
+            point = np.asarray(point_tuple, dtype=np.float64)
+            if previous is not None and np.linalg.norm(point - previous) > self.cluster_join_distance:
+                if len(current) >= self.cluster_min_points:
+                    clusters.append(np.asarray(current, dtype=np.float64))
+                current = []
+            current.append(point_tuple)
+            previous = point
+        if len(current) >= self.cluster_min_points:
+            clusters.append(np.asarray(current, dtype=np.float64))
 
-        edges = np.arange(
-            self.slot_x_min, self.slot_x_max + self.slot_bin_size, self.slot_bin_size
-        )
-        indices = np.digitize(side_points[:, 0], edges) - 1
-        indices = indices[(indices >= 0) & (indices < len(edges) - 1)]
-        occupied = np.bincount(indices, minlength=len(edges) - 1) >= self.slot_min_points
-        runs = self.true_runs(occupied)
-        min_car_bins = max(1, math.ceil(self.slot_min_vehicle_length / self.slot_bin_size))
-        runs = [run for run in runs if run[1] - run[0] + 1 >= min_car_bins]
-
-        candidates = []
-        for first, second in zip(runs, runs[1:]):
-            start_x = edges[first[1] + 1]
-            end_x = edges[second[0]]
-            length = end_x - start_x
-            if self.slot_min_length <= length <= self.slot_max_length:
-                candidates.append(SlotCandidate(
-                    start_x, end_x, float(np.median(side_distance[mask]))
-                ))
-        return min(candidates, key=lambda slot: abs(slot.center_x)) if candidates else None
+        # A vehicle bundle is assigned to its side by its centroid.  The
+        # nearest bundle on each side drives fine left/right distance control.
+        left = [cluster for cluster in clusters if float(cluster[:, 1].mean()) > 0.0]
+        right = [cluster for cluster in clusters if float(cluster[:, 1].mean()) < 0.0]
+        left_distance = self.nearest_lateral_distance(left, side=1.0)
+        right_distance = self.nearest_lateral_distance(right, side=-1.0)
+        return RearObservation(clusters, left_distance, right_distance)
 
     @staticmethod
-    def true_runs(mask: np.ndarray) -> list[tuple[int, int]]:
-        runs, start = [], None
-        for index, value in enumerate(mask):
-            if value and start is None:
-                start = index
-            elif not value and start is not None:
-                runs.append((start, index - 1))
-                start = None
-        if start is not None:
-            runs.append((start, len(mask) - 1))
-        return runs
-
-    def stable_slot(self, candidate: Optional[SlotCandidate]) -> Optional[SlotCandidate]:
-        if candidate is None:
-            self.slot_history.clear()
+    def nearest_lateral_distance(clusters: list[np.ndarray], side: float) -> Optional[float]:
+        if not clusters:
             return None
-        self.slot_history.append(candidate)
-        if len(self.slot_history) < self.slot_confirm_frames:
-            return None
-        centers = np.array([slot.center_x for slot in self.slot_history])
-        if float(np.std(centers)) > 0.18:
-            return None
-        starts = np.array([slot.start_x for slot in self.slot_history])
-        ends = np.array([slot.end_x for slot in self.slot_history])
-        distances = np.array([slot.side_distance for slot in self.slot_history])
-        return SlotCandidate(
-            float(np.median(starts)), float(np.median(ends)), float(np.median(distances))
-        )
+        distances = [float(np.median(cluster[:, 1] * side)) for cluster in clusters]
+        return min(distance for distance in distances if distance > 0.0)
 
-    def rear_clearance(self) -> float:
-        """Closest object around the rear 0-degree direction."""
-        if self.latest_points.size == 0:
-            return math.inf
-        rear = self.latest_points[(self.latest_points[:, 0] < 0.0) & (np.abs(self.latest_points[:, 1]) < 0.35)]
-        return float(np.min(np.linalg.norm(rear, axis=1))) if rear.size else math.inf
-
-    def side_clearance(self) -> float:
-        if self.latest_points.size == 0:
-            return math.inf
-        signed = self.latest_points[:, 1] * self.slot_side_sign
-        side = self.latest_points[(signed > 0.12) & (signed < 1.2)]
-        return float(np.min(np.abs(side[:, 1]))) if side.size else math.inf
-
-    def transition(self, state: ParkingState, now: float) -> None:
-        if state != self.state:
-            self.get_logger().info(f'Parking: {self.state.value} -> {state.value}')
-            self.state = state
+    def transition(self, next_state: ParkingState, now: float) -> None:
+        if self.state != next_state:
+            self.get_logger().info(f'Parking: {self.state.value} -> {next_state.value}')
+            self.state = next_state
             self.state_started_at = now
+            self.missing_bundle_frames = 0
+
+    def balance_steer(self) -> int:
+        """Equalise left/right parked-car distance in rear quadrants 3/4."""
+        left = self.observation.left_distance
+        right = self.observation.right_distance
+        if left is None or right is None:
+            return self.last_balance_steer
+        # Positive error means the left vehicle is farther than the right one.
+        error = left - right
+        steer = int(np.clip(
+            self.balance_steer_sign * self.balance_steer_kp * error,
+            -self.balance_max_steer,
+            self.balance_max_steer,
+        ))
+        self.last_balance_steer = steer
+        return steer
 
     def control_tick(self) -> None:
         now = time.monotonic()
@@ -288,86 +229,100 @@ class ParkingNodeOsy(Node):
             self.publish(0, 0)
             return
 
-        candidate = self.detect_slot()
-        stable = self.stable_slot(candidate) if self.state == ParkingState.SEARCH else None
         elapsed = now - self.state_started_at
-        rear = self.rear_clearance()
-        side = self.side_clearance()
+        two_bundles = self.observation.two_car_bundles
+        both_sides = self.observation.both_sides_visible
 
-        if self.state == ParkingState.SEARCH:
-            if stable is not None:
-                self.locked_slot = stable
-                self.transition(ParkingState.APPROACH, now)
+        if self.state == ParkingState.SEARCH_TWO_CARS:
+            self.two_car_frames = self.two_car_frames + 1 if two_bundles else 0
+            if self.two_car_frames >= self.two_car_confirm_frames:
+                self.transition(ParkingState.PASS_SECOND_CAR, now)
             self.publish(0, self.forward_speed)
             return
 
-        if self.state == ParkingState.APPROACH:
-            # Once the slot center passes the rear axle, stop and set entry steer.
-            if candidate is not None:
-                self.locked_slot = candidate
-            if self.locked_slot is not None and self.locked_slot.center_x <= self.approach_pass_x:
-                self.transition(ParkingState.STEER_IN, now)
-                self.publish(self.entry_steer, 0)
-            else:
-                self.publish(0, self.forward_speed)
+        if self.state == ParkingState.PASS_SECOND_CAR:
+            # Second parked-car bundle is confirmed: move forward a little,
+            # then lock maximum right steering before the hard-coded reverse.
+            if elapsed >= self.pass_second_car_sec:
+                self.transition(ParkingState.SET_REVERSE_STEER, now)
+            self.publish(0, self.forward_speed)
             return
 
-        if self.state == ParkingState.STEER_IN:
+        if self.state == ParkingState.SET_REVERSE_STEER:
             if elapsed >= self.steer_settle_sec:
-                self.transition(ParkingState.REVERSE_ARC, now)
-            self.publish(self.entry_steer, 0)
+                self.transition(ParkingState.REVERSE_HARD_RIGHT, now)
+            self.publish(self.right_turn_steer, 0)
             return
 
-        if self.state == ParkingState.REVERSE_ARC:
-            if rear <= self.rear_stop_distance or side <= self.side_hard_stop_distance:
-                self.transition(ParkingState.HOLD, now)
+        if self.state == ParkingState.REVERSE_HARD_RIGHT:
+            # Hard-coded right reverse until both parked-car bundles enter
+            # rear quadrants 3 and 4, then begin LiDAR fine alignment.
+            if both_sides:
+                self.transition(ParkingState.REVERSE_BALANCE, now)
+            elif elapsed >= self.reverse_seek_timeout_sec:
+                self.transition(ParkingState.PARK_STOP, now)
                 self.publish(0, 0)
-            elif elapsed >= self.reverse_arc_sec:
-                self.transition(ParkingState.COUNTER_STEER, now)
-                self.publish(-self.entry_steer, 0)
+                return
+            self.publish(self.right_turn_steer, self.reverse_speed)
+            return
+
+        if self.state == ParkingState.REVERSE_BALANCE:
+            if both_sides:
+                self.missing_bundle_frames = 0
+                self.publish(self.balance_steer(), self.balance_reverse_speed)
             else:
-                self.publish(self.entry_steer, self.reverse_speed)
+                self.missing_bundle_frames += 1
+                # Both vehicle bundles disappearing means the car has reached
+                # the parking depth requested in the mission sequence.
+                if self.missing_bundle_frames >= self.bundle_missing_frames:
+                    self.transition(ParkingState.PARK_STOP, now)
+                    self.publish(0, 0)
+                else:
+                    self.publish(self.last_balance_steer, self.balance_reverse_speed)
             return
 
-        if self.state == ParkingState.COUNTER_STEER:
-            if elapsed >= self.counter_steer_sec:
-                self.transition(ParkingState.REVERSE_ALIGN, now)
-            self.publish(-self.entry_steer, 0)
-            return
-
-        if self.state == ParkingState.REVERSE_ALIGN:
-            if rear <= self.rear_stop_distance or side <= self.side_hard_stop_distance:
-                self.transition(ParkingState.HOLD, now)
-                self.publish(0, 0)
-                return
-            if elapsed >= self.align_timeout_sec:
-                self.transition(ParkingState.HOLD, now)
-                self.publish(0, 0)
-                return
-            # Lateral clearance feedback: steer away from the adjacent parked car.
-            error = self.side_target_distance - side
-            steer = int(np.clip(-self.slot_side_sign * self.side_steer_kp * error, -20, 20))
-            self.publish(steer, self.align_reverse_speed)
-            return
-
-        if self.state == ParkingState.HOLD:
-            if elapsed >= self.hold_sec:
-                self.transition(ParkingState.EXIT_STRAIGHT, now)
+        if self.state == ParkingState.PARK_STOP:
+            if elapsed >= self.park_stop_sec:
+                self.forward_bundles_seen = False
+                self.transition(ParkingState.FORWARD_BALANCE, now)
             self.publish(0, 0)
             return
 
-        if self.state == ParkingState.EXIT_STRAIGHT:
-            if elapsed >= self.exit_straight_sec:
-                self.transition(ParkingState.EXIT_TURN, now)
-            self.publish(0, self.forward_speed)
+        if self.state == ParkingState.FORWARD_BALANCE:
+            # Drive forward while the two rear bundles are visible, preserving
+            # equal clearance.  After seeing them, their disappearance starts
+            # the hard-coded right exit turn.
+            if both_sides:
+                self.forward_bundles_seen = True
+                self.missing_bundle_frames = 0
+                self.publish(self.balance_steer(), self.forward_speed)
+                return
+            self.missing_bundle_frames += 1
+            should_exit = (
+                self.forward_bundles_seen
+                and self.missing_bundle_frames >= self.bundle_missing_frames
+            ) or elapsed >= self.forward_seek_timeout_sec
+            if should_exit:
+                self.transition(ParkingState.EXIT_RIGHT_TURN, now)
+                self.publish(self.right_turn_steer, self.forward_speed)
+            else:
+                self.publish(self.last_balance_steer, self.forward_speed)
             return
 
-        if self.state == ParkingState.EXIT_TURN:
-            if elapsed >= self.exit_turn_sec:
+        if self.state == ParkingState.EXIT_RIGHT_TURN:
+            if elapsed >= self.exit_right_turn_sec:
+                self.transition(ParkingState.EXIT_FORWARD, now)
+                self.publish(0, self.forward_speed)
+            else:
+                self.publish(self.right_turn_steer, self.forward_speed)
+            return
+
+        if self.state == ParkingState.EXIT_FORWARD:
+            if elapsed >= self.exit_forward_sec:
                 self.transition(ParkingState.DONE, now)
                 self.publish(0, 0)
             else:
-                self.publish(self.exit_steer, self.forward_speed)
+                self.publish(0, self.forward_speed)
             return
 
         self.publish(0, 0)  # DONE or EMERGENCY_STOP
