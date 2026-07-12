@@ -18,7 +18,9 @@ class LidarViewerNode(Node):
         self.declare_parameter('max_range_m', 2.0)
         self.declare_parameter('image_size', 800)
         self.declare_parameter('range_ring_step_m', 1.0)
-        self.declare_parameter('rear_quadrants_only', True)
+        # Visualisation shows every valid return.  Parking control applies
+        # its own rear/side filtering independently.
+        self.declare_parameter('rear_quadrants_only', False)
 
         self.window_name = self.get_parameter('window_name').value
         self.max_range = float(self.get_parameter('max_range_m').value)
@@ -173,8 +175,8 @@ class LidarViewerNode(Node):
 
             angle = msg.angle_min + index * msg.angle_increment
             angle = math.atan2(math.sin(angle), math.cos(angle))
-            # Parking uses rear quadrants 3/4 only; hide front quadrants 1/2
-            # in the viewer as well so the displayed data matches control.
+            # Keep this optional filter only for focused debugging.  Its
+            # default is off so the radar always exposes the complete scan.
             if self.rear_quadrants_only and abs(angle) < math.pi / 2:
                 continue
             x = int(center - math.sin(angle) * distance * scale)

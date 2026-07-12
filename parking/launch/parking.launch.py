@@ -80,18 +80,11 @@ def generate_launch_description() -> LaunchDescription:
             name='parking_drive_control',
             output='screen',
             parameters=[{
-                'max_drive_pwm': 130,
+                'max_drive_pwm': 140,
                 'steer_pwm': 150,
                 'steer_max_angle_deg': 45.0,
                 'steer_center_time': 0.45,
                 'steer_angle_tolerance_deg': 1.0,
             }],
-        ),
-        Node(
-            package='sensor_utils',
-            executable='lidar_viewer_node',
-            name='parking_lidar_viewer',
-            output='screen',
-            parameters=[{'max_range_m': 2.0, 'rear_quadrants_only': True}],
         ),
     ])
