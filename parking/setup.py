@@ -25,6 +25,7 @@ setup(
     entry_points={
         "console_scripts": [
             "parking_node = parking.parking_node:main",
+            "parking_node_osy = parking.parking_node_osy:main",
         ],
     },
 )

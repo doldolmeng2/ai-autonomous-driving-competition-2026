@@ -84,7 +84,7 @@ class LidarViewerNode(Node):
 
         cv2.putText(
             image,
-            '0 deg = FRONT, angle increases counter-clockwise',
+            '0 deg = REAR, angle increases clockwise',
             (25, size - 25),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6,
@@ -101,12 +101,12 @@ class LidarViewerNode(Node):
         label_color = (0, 220, 220)
         radius = int(size * 0.45)
 
-        # 0 deg is vehicle front. Positive angles rotate counter-clockwise.
+        # 0 deg is vehicle rear. Positive angles rotate clockwise.
         bearings = [
-            (0, '0 deg FRONT', (center + 12, center - radius + 24)),
+            (0, '0 deg REAR', (center + 12, center + radius - 12)),
             (90, '+90 deg LEFT', (center - radius + 18, center - 14)),
             (-90, '-90 deg RIGHT', (center + radius - 155, center - 14)),
-            (180, '+/-180 deg REAR', (center - 95, center + radius - 12)),
+            (180, '+/-180 deg FRONT', (center - 95, center - radius + 24)),
         ]
 
         cv2.line(image, (center, 20), (center, size - 20), guide_color, 1)
@@ -114,7 +114,7 @@ class LidarViewerNode(Node):
         cv2.arrowedLine(
             image,
             (center, center),
-            (center, 35),
+            (center, size - 35),
             label_color,
             2,
             tipLength=0.08,
@@ -123,7 +123,7 @@ class LidarViewerNode(Node):
         for angle_deg, label, label_pos in bearings:
             angle = math.radians(angle_deg)
             x = int(center - math.sin(angle) * radius)
-            y = int(center - math.cos(angle) * radius)
+            y = int(center + math.cos(angle) * radius)
             cv2.circle(image, (x, y), 5, label_color, -1)
             cv2.putText(
                 image,
@@ -149,7 +149,7 @@ class LidarViewerNode(Node):
         )
         cv2.putText(
             image,
-            'CCW +',
+            'CW +',
             (center - 95, center - 82),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.5,
@@ -169,7 +169,7 @@ class LidarViewerNode(Node):
             angle = msg.angle_min + index * msg.angle_increment
             angle = math.atan2(math.sin(angle), math.cos(angle))
             x = int(center - math.sin(angle) * distance * scale)
-            y = int(center - math.cos(angle) * distance * scale)
+            y = int(center + math.cos(angle) * distance * scale)
             intensity = 120
             if index < len(msg.intensities):
                 intensity = min(255, 80 + int(msg.intensities[index] * 4))
