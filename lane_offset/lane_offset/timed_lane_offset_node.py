@@ -99,6 +99,10 @@ LANE_OFFSET_LIMIT = 45
 OFFSET_KP = 1.0
 # 한 프레임 사이 offset이 이 값보다 더 튀면 오검출로 보고 이전 값 유지
 MAX_OFFSET_JUMP_PX = 80
+# 발행하는 lane_offset에 적용할 저역통과(EMA) 필터 계수.
+# smoothed = alpha*이번 계산값 + (1-alpha)*직전 발행값. 1.0이면 필터 없음(그대로 발행),
+# 작을수록 부드럽지만 반응이 느려진다.
+OFFSET_SMOOTHING_ALPHA = 0.4
 
 # 슬라이딩 윈도우 (범위를 좁게 잡아서 옆에 있는 꽃 그림 등을 덜 건드리게 함)
 NUM_WINDOWS = 10
@@ -179,6 +183,7 @@ class TimedLaneOffsetNode(Node):
         self.declare_parameter('lane_offset_limit', LANE_OFFSET_LIMIT)
         self.declare_parameter('offset_kp', OFFSET_KP)
         self.declare_parameter('max_offset_jump_px', MAX_OFFSET_JUMP_PX)
+        self.declare_parameter('offset_smoothing_alpha', OFFSET_SMOOTHING_ALPHA)
         self.declare_parameter('num_windows', NUM_WINDOWS)
         self.declare_parameter('window_margin', WINDOW_MARGIN)
         self.declare_parameter('window_minpix', WINDOW_MINPIX)
@@ -250,6 +255,9 @@ class TimedLaneOffsetNode(Node):
         self.max_offset_jump_px = int(
             self.get_parameter('max_offset_jump_px').value
         )
+        self.offset_smoothing_alpha = float(np.clip(
+            self.get_parameter('offset_smoothing_alpha').value, 0.0, 1.0
+        ))
         self.num_windows = int(self.get_parameter('num_windows').value)
         self.window_margin = int(self.get_parameter('window_margin').value)
         self.window_minpix = int(self.get_parameter('window_minpix').value)
@@ -496,10 +504,16 @@ class TimedLaneOffsetNode(Node):
             )
             return
 
-        self.last_offset = lane_offset
+        # 검출 노이즈로 매 프레임 값이 튀는 걸 줄이기 위해 저역통과(EMA) 필터를
+        # 적용해서 발행한다. 급격한 오검출은 위 max_offset_jump_px 체크가 이미
+        # 걸러내므로, 여기서는 정상 범위 내의 미세한 흔들림만 완만하게 만든다.
+        self.last_offset = (
+            self.offset_smoothing_alpha * lane_offset
+            + (1.0 - self.offset_smoothing_alpha) * self.last_offset
+        )
         self.update_tracker_anchors(left_x, dashed_x, right_x, white_mask.shape[1])
         self.last_lane_tracks = lane_tracks
-        self.publish_offset(lane_offset)
+        self.publish_offset(self.last_offset)
         self.publish_debug(
             msg, frame, 'OK', near_white_ratio,
             base_x=dashed_start_x, line_x=line_x, windows=windows,
@@ -1001,7 +1015,8 @@ class TimedLaneOffsetNode(Node):
         color = (0, 255, 0) if status == 'OK' else (0, 0, 255)
         lines = [
             f'status: {status}',
-            f'lane_offset: {lane_offset if lane_offset is not None else self.last_offset}',
+            f'lane_offset: {lane_offset if lane_offset is not None else round(self.last_offset)} '
+            f'(smoothed: {self.last_offset:.1f})',
             f'mode: {self.driving_mode}, dashed_ref_x: {self.dashed_reference_x_px}',
             f'white_ratio: {near_white_ratio:.2f}',
         ]
