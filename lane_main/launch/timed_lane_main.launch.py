@@ -18,7 +18,7 @@ def generate_launch_description():
         # 카메라(high) -> 오른쪽 차선 기준 offset 계산
         Node(
             package='lane_offset',
-            executable='timed_lane_offset_node_osy',
+            executable='timed_lane_offset_node',
             output='screen',
             # OpenCV 차선/마스크 디버그 창을 항상 띄운다.
             parameters=[{

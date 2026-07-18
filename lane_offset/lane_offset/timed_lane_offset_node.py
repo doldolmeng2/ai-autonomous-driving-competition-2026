@@ -58,7 +58,7 @@ LANE_OFFSET_TOPIC = '/lane_offset'
 # camera.yaml), 이전에 480 기준으로 잡혀있던 값(250~450)은 실제 프레임 높이(360)를
 # 넘어가 아래쪽이 조용히 잘리는 문제가 있었다. 실측 프레임(640x360) 기준으로
 # 다시 잡은 값이다.
-ROI_TOP = 250
+ROI_TOP = 220
 ROI_BOTTOM = 360
 # ROI 안에서 사용할 사다리꼴의 좌/우 inset. 아래쪽은 경계 차선을 보존하기 위해
 # 거의 자르지 않고, 위쪽만 좁혀 먼 거리의 양옆 잡음을 제외한다. (640px 폭 기준)
@@ -96,13 +96,14 @@ DASHED_REFERENCE_X_PX_1LANE = 510
 OFFSET_ERROR_LIMIT_PX = 195
 LANE_OFFSET_LIMIT = 45
 # 기준선 오차를 offset으로 바꾼 뒤 적용할 비례 이득. 최종값은 +/-45로 제한한다.
-OFFSET_KP = 1.0
+OFFSET_KP = 1.5
+
 # 한 프레임 사이 offset이 이 값보다 더 튀면 오검출로 보고 이전 값 유지
 MAX_OFFSET_JUMP_PX = 80
 # 발행하는 lane_offset에 적용할 저역통과(EMA) 필터 계수.
 # smoothed = alpha*이번 계산값 + (1-alpha)*직전 발행값. 1.0이면 필터 없음(그대로 발행),
 # 작을수록 부드럽지만 반응이 느려진다.
-OFFSET_SMOOTHING_ALPHA = 0.4
+OFFSET_SMOOTHING_ALPHA = 0.6
 
 # 슬라이딩 윈도우 (범위를 좁게 잡아서 옆에 있는 꽃 그림 등을 덜 건드리게 함)
 NUM_WINDOWS = 10
@@ -111,6 +112,11 @@ WINDOW_MINPIX = 50
 # 점선은 빈 구간을 넘어 다음 조각을 잡아야 하므로 실선보다 넓게 탐색한다.
 DASHED_WINDOW_MARGIN = 130
 WINDOW_MIN_COMPONENT_PIXELS = 30
+# offset에 쓰는 차선 x는 "차 바로 앞(ROI 바닥에서 이 픽셀 수 이내)"의 점만으로
+# 계산한다. 슬라이딩 윈도우 추적 자체는 ROI 전체(먼 곳 포함)를 쓰지만, 커브에서
+# 먼 점선이 직선 피팅 기울기를 당겨 바닥 x를 왜곡하는 것을 막기 위해, 최종 x는
+# 근접 밴드로 제한한다. 근접 점이 부족하면(점선 공백) 전체 수집점으로 폴백한다.
+OFFSET_NEAR_ROWS = 60
 # 중앙 점선과 1/2차선 실선의 하단 x가 이 거리보다 가까우면 같은 선을 추적한
 # 것으로 판단한다. 이 프레임은 무효 처리하고 이전 offset을 유지한다.
 CENTER_LINE_OVERLAP_DISTANCE_PX = 45
@@ -188,6 +194,7 @@ class TimedLaneOffsetNode(Node):
         self.declare_parameter('window_margin', WINDOW_MARGIN)
         self.declare_parameter('window_minpix', WINDOW_MINPIX)
         self.declare_parameter('dashed_window_margin', DASHED_WINDOW_MARGIN)
+        self.declare_parameter('offset_near_rows', OFFSET_NEAR_ROWS)
         self.declare_parameter(
             'center_line_overlap_distance_px', CENTER_LINE_OVERLAP_DISTANCE_PX
         )
@@ -263,6 +270,9 @@ class TimedLaneOffsetNode(Node):
         self.window_minpix = int(self.get_parameter('window_minpix').value)
         self.dashed_window_margin = int(
             self.get_parameter('dashed_window_margin').value
+        )
+        self.offset_near_rows = max(
+            1, int(self.get_parameter('offset_near_rows').value)
         )
         self.center_line_overlap_distance_px = max(0, int(
             self.get_parameter('center_line_overlap_distance_px').value
@@ -384,6 +394,11 @@ class TimedLaneOffsetNode(Node):
 
         # 세 차선을 독립 슬라이딩 윈도우로 추적한다. 모드별 중앙 점선 기준값은
         # 점선 트래커의 시작점이며, 점선 창은 빈 구간에서 진행 방향을 예측해 연결한다.
+        # 모드별로 화면 밖으로 나가는 외곽 실선(2차로=왼쪽, 1차로=오른쪽)은 아예
+        # 추적하지 않는다. 존재하지 않는 선을 억지로 좇다가 반대편 실선을 물어
+        # left_x>=dashed_x 같은 거짓 INVALID LANE ORDER를 만드는 것을 막는다.
+        track_left = self.driving_mode != '2lane'
+        track_right = self.driving_mode != '1lane'
         left_start_x = self.get_window_start_x('left', left_base_x)
         dashed_start_x = self.get_window_start_x(
             'dashed', self.dashed_reference_x_px
@@ -393,7 +408,7 @@ class TimedLaneOffsetNode(Node):
             self.track_lane_with_sliding_window(
                 white_mask, left_start_x, self.window_margin, allow_gaps=False
             )
-            if left_start_x is not None
+            if track_left and left_start_x is not None
             else (None, [], [], [])
         )
         dashed_track = self.track_lane_with_sliding_window(
@@ -404,7 +419,7 @@ class TimedLaneOffsetNode(Node):
             self.track_lane_with_sliding_window(
                 white_mask, right_start_x, self.window_margin, allow_gaps=False
             )
-            if right_start_x is not None
+            if track_right and right_start_x is not None
             else (None, [], [], [])
         )
         left_x, _left_windows, _left_points_x, _left_points_y = left_track
@@ -920,12 +935,22 @@ class TimedLaneOffsetNode(Node):
 
         if len(collected_x) < self.window_min_component_pixels:
             return None, windows, collected_x, collected_y
-        unique_y = len(set(collected_y))
-        if unique_y >= 3 and len(collected_x) >= 12:
-            coeffs = np.polyfit(collected_y, collected_x, 1)
+        # offset에 쓰는 x는 근접 밴드(바닥에서 offset_near_rows 이내)의 점만으로
+        # 계산해 먼 커브가 바닥 x를 당기는 것을 막는다. 근접 점이 부족하면(점선
+        # 공백 등) 전체 수집점으로 폴백한다. 추적/디버그용 collected_*는 그대로 반환.
+        cy = np.asarray(collected_y, dtype=float)
+        cx = np.asarray(collected_x, dtype=float)
+        near = cy >= (height - self.offset_near_rows)
+        if int(near.sum()) >= 8:
+            # 근접 밴드에 점이 충분하면 그 median을 차 앞 점선 위치로 쓴다.
+            # median은 외삽 없이 근접 픽셀의 중앙값이라 먼 커브/이상치에 둔감하다.
+            line_x = float(np.median(cx[near]))
+        elif len(set(collected_y)) >= 3 and len(collected_x) >= 12:
+            # 근접 점이 부족(점선 공백 등)하면 전체 수집점 직선 피팅으로 폴백.
+            coeffs = np.polyfit(cy, cx, 1)
             line_x = float(np.polyval(coeffs, height - 1))
         else:
-            line_x = float(np.mean(collected_x))
+            line_x = float(cx.mean())
         return line_x, windows, collected_x, collected_y
 
     # ======================================================================
