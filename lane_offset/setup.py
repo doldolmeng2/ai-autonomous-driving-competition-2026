@@ -22,6 +22,7 @@ setup(
         'console_scripts': [
             'timed_lane_offset_node = lane_offset.timed_lane_offset_node:main',
             'timed_lane_offset_node_osy = lane_offset.timed_lane_offset_node_osy:main',
+            'timed_lane_offset_node_ngg = lane_offset.timed_lane_offset_node_ngg:main',
             'mission_lane_offset_node = lane_offset.mission_lane_offset_node:main',
             'mission_lane_offset_node_osy = lane_offset.mission_lane_offset_node_osy:main',
             'lane_offset_debug_viewer_node = lane_offset.lane_offset_debug_viewer_node:main',
