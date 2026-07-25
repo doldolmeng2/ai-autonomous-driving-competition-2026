@@ -53,9 +53,13 @@ import cv2
 IMAGE_TOPIC = '/camera/high/image_raw'
 LANE_OFFSET_TOPIC = '/lane_offset'
 
-# ROI: 이미지 상단(배경)과 하단(차량 후드)을 잘라낸다. (640x480 기준)
+# ROI: 이미지 상단(배경)과 하단(차량 후드)을 잘라낸다. (640x360 기준)
+# 카메라가 640x480이 아니라 640x360(16:9)으로 설정되어 있어(sensor_topic/config/
+# camera.yaml), 이전에 480 기준으로 잡혀있던 값(250~450)은 실제 프레임 높이(360)를
+# 넘어가 아래쪽이 조용히 잘리는 문제가 있었다. 실측 프레임(640x360) 기준으로
+# 다시 잡은 값이다.
 ROI_TOP = 250
-ROI_BOTTOM = 450
+ROI_BOTTOM = 360
 # ROI 안에서 사용할 사다리꼴의 좌/우 inset. 아래쪽은 경계 차선을 보존하기 위해
 # 거의 자르지 않고, 위쪽만 좁혀 먼 거리의 양옆 잡음을 제외한다. (640px 폭 기준)
 ROI_TRAPEZOID_TOP_INSET_PX = 150
@@ -74,8 +78,9 @@ GREEN_V_MIN = 70
 GRAY_S_MIN = 25
 GRAY_V_MIN = 150
 
-# 오른쪽 차선 탐색에 쓰는 근접(ROI 하단) 밴드 높이
-NEAR_FIELD_ROWS = 100
+# 오른쪽 차선 탐색에 쓰는 근접(ROI 하단) 밴드 높이. ROI 높이(150px)의 절반 정도로,
+# 이전 480 기준(100/200=50%) 비율을 그대로 유지한다.
+NEAR_FIELD_ROWS = 75
 # 근접 밴드에서 흰색 비율이 이 값을 넘으면 횡단보도 등으로 판단하고 무시
 WHITE_OVERLOAD_RATIO = 0.15
 
@@ -110,7 +115,7 @@ CENTER_LINE_OVERLAP_DISTANCE_PX = 45
 WINDOW_START_ADAPT_RATE = 0.5
 # 새 검출 위치가 이전 박스 시작점에서 이 거리보다 크게 튀면 오검출로 보고
 # 시작점을 갱신하지 않는다.
-MAX_WINDOW_START_JUMP_PX = 100
+MAX_WINDOW_START_JUMP_PX = 130
 # 곡선에서는 색 매트와 흰 실선이 같은 x strip에 정확히 겹치지 않는다. 이 거리
 # 이내면 "색 덩어리 근처의 흰 실선"으로 보고 슬라이딩 윈도우 시작점으로 사용한다.
 BOUNDARY_COLOR_NEAR_DISTANCE_PX = 100
