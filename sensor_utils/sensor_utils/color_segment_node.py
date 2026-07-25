@@ -29,7 +29,7 @@ from sensor_msgs.msg import Image
 # 'ycrcb' 가 None 인 클래스는 HSV 마스크만 사용한다.
 # 여러 클래스에 걸리는 픽셀은 CLASSES 뒤쪽 항목이 앞쪽 항목을 덮어쓴다.
 # ============================================================================
-IMAGE_TOPIC = '/camera/left/image_raw'
+IMAGE_TOPIC = '/camera/high/image_raw'
 
 BACKGROUND_COLOR_BGR = (0, 0, 0)
 
@@ -38,7 +38,7 @@ CLASSES = [
         'name': 'white',
         'color_bgr': (255, 255, 255),
         'hsv': {'h': (0, 179), 's': (0, 44), 'v': (178, 255)},
-        'ycrcb': {'y': (175, 255), 'cr': (81, 165), 'cb': (122, 170)},
+        'ycrcb': {'y': (135, 255), 'cr': (81, 165), 'cb': (122, 170)},
     },
     {
         'name': 'light_gray',
@@ -49,13 +49,13 @@ CLASSES = [
     {
         'name': 'dark_gray',
         'color_bgr': (105, 105, 105),
-        'hsv': {'h': (0, 179), 's': (0, 102), 'v': (0, 121)},
-        'ycrcb': {'y': (0, 110), 'cr': (0, 255), 'cb': (0, 142)},
+        'hsv': {'h': (0, 179), 's': (0, 102), 'v': (0, 144)},
+        'ycrcb': {'y': (0, 144), 'cr': (0, 255), 'cb': (0, 142)},
     },
     {
         'name': 'green',
         'color_bgr': (0, 255, 0),
-        'hsv': {'h': (40, 56), 's': (48, 200), 'v': (0, 255)},
+        'hsv': {'h': (31, 60), 's': (48, 200), 'v': (0, 255)},
         'ycrcb': None,
     },
 ]

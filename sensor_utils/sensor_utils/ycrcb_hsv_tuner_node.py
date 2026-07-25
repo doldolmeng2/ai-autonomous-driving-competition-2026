@@ -26,24 +26,28 @@ IMAGE_TOPIC = '/camera/high/image_raw'
 PRESET = 'white'
 
 WIN_CONTROLS = 'ycrcb_hsv_tuner_controls'
+WIN_VALUES = 'ycrcb_hsv_tuner_values'
 WIN_ORIGINAL = 'ycrcb_hsv_tuner_original'
 WIN_HSV_MASK = 'ycrcb_hsv_tuner_hsv_mask'
 WIN_YCRCB_MASK = 'ycrcb_hsv_tuner_ycrcb_mask'
 WIN_COMBINED_MASK = 'ycrcb_hsv_tuner_combined_mask'
 WIN_RESULT = 'ycrcb_hsv_tuner_result'
 
-# lane_offset 에서 이미 쓰고 있는 값들을 시작점으로 제공 (거기서부터 미세 조정)
+# lane_offset/sensor_utils 의 color_segment(_bev)_node.py CLASSES 와 동일한 값
 HSV_PRESETS = {
-    # H는 흰색 판별에 안 쓰므로 전체 범위로 둠
-    'white': {'h': (0, 179), 's': (0, 60), 'v': (140, 255)},
-    'green': {'h': (30, 90), 's': (40, 255), 'v': (70, 255)},
+    'white': {'h': (0, 179), 's': (0, 44), 'v': (178, 255)},
+    'light_gray': {'h': (56, 179), 's': (0, 64), 'v': (119, 165)},
+    'dark_gray': {'h': (0, 179), 's': (0, 102), 'v': (0, 144)},
+    'green': {'h': (31, 60), 's': (48, 200), 'v': (0, 255)},
     'full': {'h': (0, 179), 's': (0, 255), 'v': (0, 255)},
 }
 
 # YCrCb는 아직 lane_offset에서 쓰지 않으므로 대략적인 시작값만 제공.
 # Y=밝기, Cr/Cb=색차이며 무채색(흰색)일수록 Cr/Cb가 128 근처에 몰린다.
 YCRCB_PRESETS = {
-    'white': {'y': (180, 255), 'cr': (110, 150), 'cb': (110, 150)},
+    'white': {'y': (135, 255), 'cr': (81, 165), 'cb': (122, 170)},
+    'light_gray': {'y': (0, 163), 'cr': (0, 255), 'cb': (0, 255)},
+    'dark_gray': {'y': (0, 144), 'cr': (0, 255), 'cb': (0, 142)},
     'green': {'y': (0, 255), 'cr': (0, 140), 'cb': (0, 140)},
     'full': {'y': (0, 255), 'cr': (0, 255), 'cb': (0, 255)},
 }
@@ -60,8 +64,8 @@ class YCrCbHsvTunerNode(Node):
 
         self.image_topic = self.get_parameter('image_topic').value
         preset_name = self.get_parameter('preset').value
-        hsv_preset = HSV_PRESETS.get(preset_name, HSV_PRESETS['white'])
-        ycrcb_preset = YCRCB_PRESETS.get(preset_name, YCRCB_PRESETS['white'])
+        hsv_preset = HSV_PRESETS.get(preset_name, HSV_PRESETS['green'])
+        ycrcb_preset = YCRCB_PRESETS.get(preset_name, YCRCB_PRESETS['green'])
 
         self.frame = None
         self.setup_windows(hsv_preset, ycrcb_preset)
@@ -82,6 +86,10 @@ class YCrCbHsvTunerNode(Node):
     def setup_windows(self, hsv_preset, ycrcb_preset):
         cv2.namedWindow(WIN_CONTROLS, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(WIN_CONTROLS, 420, 480)
+        # Qt 트랙바 라벨 텍스트가 시스템 테마에 따라 안 보이는 경우가 있어서,
+        # 값을 직접 putText로 그려서 보여주는 창을 별도로 둔다.
+        cv2.namedWindow(WIN_VALUES, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(WIN_VALUES, 260, 340)
         cv2.namedWindow(WIN_ORIGINAL, cv2.WINDOW_NORMAL)
         cv2.namedWindow(WIN_HSV_MASK, cv2.WINDOW_NORMAL)
         cv2.namedWindow(WIN_YCRCB_MASK, cv2.WINDOW_NORMAL)
@@ -141,6 +149,12 @@ class YCrCbHsvTunerNode(Node):
             ycrcb, (y_min, cr_min, cb_min), (y_max, cr_max, cb_max)
         )
 
+        values_view = self.render_values(
+            h_min, h_max, s_min, s_max, v_min, v_max,
+            y_min, y_max, cr_min, cr_max, cb_min, cb_max,
+        )
+        cv2.imshow(WIN_VALUES, values_view)
+
         combined_mask = cv2.bitwise_and(hsv_mask, ycrcb_mask)
         result = cv2.bitwise_and(self.frame, self.frame, mask=combined_mask)
 
@@ -185,6 +199,24 @@ class YCrCbHsvTunerNode(Node):
         cv2.imshow(WIN_COMBINED_MASK, combined_mask)
         cv2.imshow(WIN_RESULT, result)
         cv2.waitKey(1)
+
+    # ======================================================================
+    # 트랙바 값을 putText로 그린 이미지를 만든다. Qt 트랙바 라벨이 시스템
+    # 테마 때문에 안 보이는 환경에서도 값을 확인할 수 있게 하기 위함.
+    # ======================================================================
+    def render_values(self, h_min, h_max, s_min, s_max, v_min, v_max,
+                       y_min, y_max, cr_min, cr_max, cb_min, cb_max):
+        rows = [
+            ('H', h_min, h_max), ('S', s_min, s_max), ('V', v_min, v_max),
+            ('Y', y_min, y_max), ('Cr', cr_min, cr_max), ('Cb', cb_min, cb_max),
+        ]
+        view = np.zeros((260, 260, 3), dtype=np.uint8)
+        for i, (name, lo, hi) in enumerate(rows):
+            cv2.putText(
+                view, f'{name}: [{lo}, {hi}]', (10, 30 + i * 40),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA,
+            )
+        return view
 
     # ======================================================================
     # YUYV -> BGR 변환 (sensor_utils/camera_viewer_node.py 와 동일한 방식)
