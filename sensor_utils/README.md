@@ -26,3 +26,21 @@ ros2 launch sensor_utils sensors_bag.launch.py
 ros2 launch sensor_utils sensors_controller_bag.launch.py
 ros2 launch sensor_utils bag_visualization.launch.py
 ```
+
+`sensors_controller_bag.launch.py`는 전체 센서와 컨트롤러를 기록하면서
+조이스틱 수동 주행 연결도 함께 실행한다.
+
+```text
+/manual_controller/joy
+  -> joy_to_motor_node
+  -> /motor_control
+  -> drive_control_node
+  -> /arduino/motor_command
+  -> arduino_communication_node
+  -> Arduino serial
+```
+
+기본 축은 오른쪽 스틱 좌우 `axes[3]`(조향), 왼쪽 스틱 상하
+`axes[1]`(주행)이며, 조향각은 ±45도, 주행 PWM은 ±130으로 제한된다.
+컨트롤러 축 배열은 기종에 따라 다를 수 있으므로 바퀴를 띄운 상태에서
+`ros2 topic echo /manual_controller/joy`로 먼저 확인한다.

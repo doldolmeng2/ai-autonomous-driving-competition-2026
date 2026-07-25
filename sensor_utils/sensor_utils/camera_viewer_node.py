@@ -53,6 +53,18 @@ class CameraViewerNode(Node):
         frame = self.to_bgr(msg)
         if frame is None:
             return
+        # Keep the received image buffer untouched and draw a red guide at the
+        # exact horizontal midpoint of every camera view.
+        frame = frame.copy()
+        height, width = frame.shape[:2]
+        center_x = width // 2
+        cv2.line(
+            frame,
+            (center_x, 0),
+            (center_x, height - 1),
+            (0, 0, 255),
+            2,
+        )
         cv2.imshow(f'{self.window_prefix}_{side}', frame)
 
     def to_bgr(self, msg):

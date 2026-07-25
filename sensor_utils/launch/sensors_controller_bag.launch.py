@@ -44,6 +44,34 @@ def generate_launch_description():
             output='screen',
             parameters=[str(share / 'config' / 'controller.yaml')],
         ),
+        # /manual_controller/joy -> /motor_control [steer angle, drive PWM]
+        Node(
+            package='sensor_utils',
+            executable='joy_to_motor_node',
+            output='screen',
+            parameters=[{
+                'steer_axis': 3,
+                'drive_axis': 1,
+                'invert_steer_axis': False,
+                'invert_drive_axis': True,
+                'deadzone': 0.2,
+                'max_speed': 130,
+                'max_steer': 45,
+            }],
+        ),
+        # /motor_control -> /arduino/motor_command [steer PWM, drive PWM]
+        Node(
+            package='drive_control',
+            executable='drive_control_node',
+            output='screen',
+            parameters=[{
+                'max_drive_pwm': 130,
+                'steer_pwm': 150,
+                'steer_max_angle_deg': 45.0,
+                'steer_center_time': 0.45,
+                'steer_angle_tolerance_deg': 1.0,
+            }],
+        ),
         ExecuteProcess(
             cmd=['ros2', 'bag', 'record', '-a'],
             output='screen',

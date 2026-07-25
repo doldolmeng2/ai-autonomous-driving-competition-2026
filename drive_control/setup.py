@@ -21,6 +21,8 @@ setup(
     entry_points={
         'console_scripts': [
             'drive_control_node = drive_control.drive_control_node:main',
+            'drive_control_motion_test = drive_control.motion_test_node:main',
+            'steering_time_test = drive_control.steering_time_test:main',
         ],
     },
 )

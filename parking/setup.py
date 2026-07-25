@@ -26,6 +26,7 @@ setup(
         "console_scripts": [
             "parking_node = parking.parking_node:main",
             "parking_node_osy = parking.parking_node_osy:main",
+            "parking_node_yym = parking.parking_node_yym:main",
         ],
     },
 )

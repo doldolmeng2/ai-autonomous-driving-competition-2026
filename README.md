@@ -117,6 +117,11 @@ ros2 launch sensor_utils sensors_controller_bag.launch.py
 ros2 launch sensor_utils bag_visualization.launch.py
 ```
 
+`sensors_controller_bag.launch.py`는 센서/컨트롤러 rosbag 기록과 함께
+`/manual_controller/joy -> /motor_control -> /arduino/motor_command` 수동
+주행 연결도 실행한다. 컨트롤러 축 매핑은 실차 구동 전에
+`ros2 topic echo /manual_controller/joy`로 확인한다.
+
 ## Topics
 
 | Topic | Type |

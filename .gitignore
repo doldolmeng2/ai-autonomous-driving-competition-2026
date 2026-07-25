@@ -44,3 +44,5 @@ calibration/**/ost.yaml
 track_test_*
 
 cam_*
+
+bagfiles/

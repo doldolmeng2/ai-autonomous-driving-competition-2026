@@ -33,6 +33,11 @@ constexpr unsigned long COMMAND_TIMEOUT_MS = 500;
 constexpr unsigned long SENSOR_PERIOD_MS = 180;
 constexpr unsigned long ECHO_TIMEOUT_US = 20000;
 constexpr unsigned long SENSOR_GUARD_US = 3000;
+// 실차 측정 후 이 두 시간만 조정한다.
+constexpr unsigned long LEFT_END_TIME_MS = 2000;
+constexpr unsigned long LEFT_TO_CENTER_TIME_MS = 450;
+constexpr unsigned long STEER_SETTLE_TIME_MS = 300;
+
 
 char commandBuffer[32];
 uint8_t commandLength = 0;
@@ -82,6 +87,21 @@ void setDrive(int value) {
 void stopAll() {
   setSteer(0);
   setDrive(0);
+}
+
+void homeSteering() {
+  setDrive(0);
+
+  // 현재 위치와 관계없이 왼쪽 끝까지 이동한다.
+  setSteer(-MAX_STEER_PWM);
+  delay(LEFT_END_TIME_MS);
+  setSteer(0);
+  delay(STEER_SETTLE_TIME_MS);
+
+  // 왼쪽 끝에서 중앙까지 복귀한다.
+  setSteer(MAX_STEER_PWM);
+  delay(LEFT_TO_CENTER_TIME_MS);
+  stopAll();
 }
 
 void processCommand() {
@@ -177,8 +197,8 @@ void setup() {
   pinMode(MOTOR1_IN1, OUTPUT);
   pinMode(MOTOR1_IN2, OUTPUT);
   pinMode(MOTOR2_IN1, OUTPUT);
+  
   pinMode(MOTOR2_IN2, OUTPUT);
-
   for (uint8_t index = 0; index < SENSOR_COUNT; ++index) {
     pinMode(TRIG_PINS[index], OUTPUT);
     pinMode(ECHO_PINS[index], INPUT);
@@ -186,6 +206,7 @@ void setup() {
   }
 
   stopAll();
+  homeSteering();
   lastCommandAt = millis();
   lastSensorAt = millis();
 }
@@ -198,3 +219,4 @@ void loop() {
     publishUltrasonics();
   }
 }
+
