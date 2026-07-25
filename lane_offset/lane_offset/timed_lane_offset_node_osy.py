@@ -147,8 +147,8 @@ DEBUG_IMAGE_TOPIC = '/lane_offset/debug_image'
 class TimedLaneOffsetNode(Node):
     """/camera/high/image_raw -> 중앙 점선 기준 offset을 계산해 /lane_offset 발행."""
 
-    def __init__(self):
-        super().__init__('timed_lane_offset_node_osy')
+    def __init__(self, node_name='timed_lane_offset_node_osy'):
+        super().__init__(node_name)
 
         # ---- 파라미터 ------------------------------------------------------
         self.declare_parameter('roi_top', ROI_TOP)
