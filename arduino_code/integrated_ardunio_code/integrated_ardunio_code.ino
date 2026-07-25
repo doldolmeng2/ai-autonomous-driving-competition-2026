@@ -28,7 +28,7 @@ constexpr uint8_t TRIG_PINS[SENSOR_COUNT] = {22, 26, 30, 34, 38, 44};
 constexpr uint8_t ECHO_PINS[SENSOR_COUNT] = {23, 27, 31, 35, 39, 45};
 
 constexpr int MAX_STEER_PWM = 150;
-constexpr int MAX_DRIVE_PWM = 130;
+constexpr int MAX_DRIVE_PWM = 140;
 constexpr unsigned long COMMAND_TIMEOUT_MS = 500;
 constexpr unsigned long SENSOR_PERIOD_MS = 180;
 constexpr unsigned long ECHO_TIMEOUT_US = 20000;

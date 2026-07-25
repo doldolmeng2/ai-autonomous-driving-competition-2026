@@ -16,7 +16,7 @@ def generate_launch_description():
             parameters=[{
                 'port': 'auto',
                 'max_steer_pwm': 150,
-                'max_drive_pwm': 130,
+                'max_drive_pwm': 140,
             }],
         ),
         Node(
@@ -36,7 +36,7 @@ def generate_launch_description():
                 'invert_steer_axis': False,
                 'invert_drive_axis': True,
                 'deadzone': 0.2,
-                'max_speed': 130,
+                'max_speed': 140,
                 'max_steer': 45,
             }],
         ),
@@ -45,7 +45,7 @@ def generate_launch_description():
             executable='drive_control_node',
             output='screen',
             parameters=[{
-                'max_drive_pwm': 130,
+                'max_drive_pwm': 140,
                 'steer_pwm': 150,
                 'steer_max_angle_deg': 45.0,
                 'steer_center_time': 0.45,

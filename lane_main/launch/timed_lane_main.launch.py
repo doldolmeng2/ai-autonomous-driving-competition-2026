@@ -16,7 +16,7 @@ def generate_launch_description():
             parameters=[{
                 'port': 'auto',
                 'max_steer_pwm': 150,
-                'max_drive_pwm': 130,
+                'max_drive_pwm': 140,
             }],
         ),
         Node(
@@ -28,7 +28,7 @@ def generate_launch_description():
         # 카메라(high) -> 오른쪽 차선 기준 offset 계산
         Node(
             package='lane_offset',
-            executable='timed_lane_offset_node_osy',
+            executable='timed_lane_offset_node',
             output='screen',
             # OpenCV 차선/마스크 디버그 창을 항상 띄운다.
             parameters=[{
@@ -41,7 +41,7 @@ def generate_launch_description():
             executable='timed_lane_main_node',
             output='screen',
             parameters=[{
-                'base_speed': 130,
+                'base_speed': 140,
                 'max_steer': 45,
             }],
         ),
@@ -50,7 +50,7 @@ def generate_launch_description():
             executable='drive_control_node',
             output='screen',
             parameters=[{
-                'max_drive_pwm': 110,
+                'max_drive_pwm': 140,
                 'steer_pwm': 150,
                 'steer_max_angle_deg': 45.0,
                 'steer_center_time': 0.45,
