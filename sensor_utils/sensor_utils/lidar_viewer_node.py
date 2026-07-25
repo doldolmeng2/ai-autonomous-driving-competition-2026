@@ -91,7 +91,7 @@ class LidarViewerNode(Node):
 
         cv2.putText(
             image,
-            '0 deg = FRONT, + = LEFT, - = RIGHT',
+            'REAR 0 | RIGHT +90 | FRONT +/-180 | LEFT -90',
             (25, size - 25),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6,
@@ -108,12 +108,12 @@ class LidarViewerNode(Node):
         label_color = (0, 220, 220)
         radius = int(size * 0.45)
 
-        # 0 deg is vehicle front. Positive angles point vehicle-left.
+        # Bearings increase counter-clockwise from the vehicle rear.
         bearings = [
-            (0, '0 deg FRONT', (center + 12, center - radius + 24)),
-            (90, '+90 deg LEFT', (center - radius + 18, center - 14)),
-            (-90, '-90 deg RIGHT', (center + radius - 155, center - 14)),
-            (180, '+/-180 deg REAR', (center - 95, center + radius - 12)),
+            (0, '0 deg REAR', (center + 12, center + radius - 12)),
+            (90, '+90 deg RIGHT', (center + radius - 165, center - 14)),
+            (-90, '-90 deg LEFT', (center - radius + 18, center - 14)),
+            (180, '+/-180 deg FRONT', (center - 100, center - radius + 24)),
         ]
 
         cv2.line(image, (center, 20), (center, size - 20), guide_color, 1)
@@ -129,8 +129,8 @@ class LidarViewerNode(Node):
 
         for angle_deg, label, label_pos in bearings:
             angle = math.radians(angle_deg)
-            x = int(center - math.sin(angle) * radius)
-            y = int(center - math.cos(angle) * radius)
+            x = int(center + math.sin(angle) * radius)
+            y = int(center + math.cos(angle) * radius)
             cv2.circle(image, (x, y), 5, label_color, -1)
             cv2.putText(
                 image,
@@ -156,8 +156,8 @@ class LidarViewerNode(Node):
         )
         cv2.putText(
             image,
-            '+ LEFT',
-            (center - 95, center - 82),
+            '+ CCW / RIGHT',
+            (center + 78, center + 92),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.5,
             label_color,
@@ -177,10 +177,10 @@ class LidarViewerNode(Node):
             angle = math.atan2(math.sin(angle), math.cos(angle))
             # Keep this optional filter only for focused debugging.  Its
             # default is off so the radar always exposes the complete scan.
-            if self.rear_quadrants_only and abs(angle) < math.pi / 2:
+            if self.rear_quadrants_only and abs(angle) > math.pi / 2:
                 continue
-            x = int(center - math.sin(angle) * distance * scale)
-            y = int(center - math.cos(angle) * distance * scale)
+            x = int(center + math.sin(angle) * distance * scale)
+            y = int(center + math.cos(angle) * distance * scale)
             intensity = 120
             if index < len(msg.intensities):
                 intensity = min(255, 80 + int(msg.intensities[index] * 4))

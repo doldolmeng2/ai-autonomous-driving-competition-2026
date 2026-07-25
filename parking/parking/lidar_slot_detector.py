@@ -31,7 +31,11 @@ class LidarDetectorConfig:
 
 
 class LidarSlotDetector:
-    """Occupied-gap-occupied detector with PCA boundary fitting."""
+    """Occupied-gap-occupied detector with PCA boundary fitting.
+
+    LaserScan bearings use rear=0, right=+pi/2, front=+/-pi, left=-pi/2.
+    Detector points use the vehicle frame: x forward and y left.
+    """
 
     def __init__(self, config: LidarDetectorConfig):
         self.config = config
@@ -52,7 +56,7 @@ class LidarSlotDetector:
                 continue
             angle = angle_min + index * angle_increment
             points.append(
-                (distance * math.cos(angle), distance * math.sin(angle))
+                (-distance * math.cos(angle), -distance * math.sin(angle))
             )
         return (
             np.asarray(points, dtype=np.float64)

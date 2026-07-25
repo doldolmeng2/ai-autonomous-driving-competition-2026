@@ -14,6 +14,8 @@
 | `controller_viewer_node` | `/manual_controller/joy` | OpenCV controller window |
 | `joy_to_motor_node` | `/manual_controller/joy` | `/motor_control` |
 
+`lidar_viewer_node` uses rear 0°, right +90°, front ±180°, and left -90°.
+
 Useful launches:
 
 ```bash

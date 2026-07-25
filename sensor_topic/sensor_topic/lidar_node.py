@@ -16,7 +16,11 @@ SCAN_DESCRIPTOR = bytes([0xA5, 0x5A, 0x05, 0x00, 0x00, 0x40, 0x81])
 
 
 class LidarNode(Node):
-    """Publish LaserScan from an RPLidar A1-compatible serial device."""
+    """Publish LaserScan using the vehicle's rear-zero bearing convention.
+
+    Bearings increase counter-clockwise from the vehicle rear:
+    rear=0, right=+pi/2, front=+/-pi, and left=-pi/2.
+    """
 
     def __init__(self):
         super().__init__('lidar_node')
@@ -135,7 +139,10 @@ class LidarNode(Node):
             if parsed is None:
                 continue
             angle_rad, distance_m, quality = parsed
-            index = int(angle_rad / self.angle_increment) % self.bin_count
+            signed_angle = math.atan2(math.sin(angle_rad), math.cos(angle_rad))
+            index = int(
+                round((signed_angle + math.pi) / self.angle_increment)
+            ) % self.bin_count
             if self.range_min <= distance_m <= self.range_max:
                 self.current_ranges[index] = distance_m
                 self.current_intensities[index] = float(quality)
@@ -166,8 +173,8 @@ class LidarNode(Node):
         msg = LaserScan()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = self.frame_id
-        msg.angle_min = 0.0
-        msg.angle_max = 2.0 * math.pi - self.angle_increment
+        msg.angle_min = -math.pi
+        msg.angle_max = math.pi - self.angle_increment
         msg.angle_increment = self.angle_increment
         msg.time_increment = 0.0
         msg.scan_time = self.publish_period

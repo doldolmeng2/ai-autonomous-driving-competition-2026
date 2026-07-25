@@ -39,3 +39,8 @@ calibration/**/ost.yaml
 *.swp
 *~
 .DS_Store
+
+
+track_test_*
+
+cam_*

@@ -32,17 +32,17 @@ def test_full_perpendicular_t_parking_sequence():
     clock = [0.0]
 
     empty = make_scan()
-    right_one = make_scan([(-165, -140, 1.15)])
+    right_one = make_scan([(15, 40, 1.15)])
     # The second vehicle is in the extended RIGHT-side field near its boundary.
-    right_two = make_scan([(-175, -158, 1.50), (-110, -82, 0.85)])
+    right_two = make_scan([(5, 22, 1.50), (70, 98, 0.85)])
     # During reverse, a second RIGHT bundle can appear near the boundary and
     # must be added as B2 while the original RIGHT bundle remains B1.
-    reverse_pair = make_scan([(-175, -155, 1.35), (-110, -82, 0.80)])
-    reverse_b2_left = make_scan([(-175, -155, 1.35), (82, 110, 0.80)])
-    reverse_b2_approaching = make_scan([(-175, -155, 1.35), (82, 110, 0.75)])
-    reverse_b2_close = make_scan([(-175, -155, 1.35), (82, 110, 0.45)])
-    reverse_b2_receding = make_scan([(-175, -155, 1.35), (82, 110, 0.65)])
-    reverse_single = make_scan([(-175, -150, 1.25)])
+    reverse_pair = make_scan([(5, 25, 1.35), (70, 98, 0.80)])
+    reverse_b2_left = make_scan([(5, 25, 1.35), (-98, -70, 0.80)])
+    reverse_b2_approaching = make_scan([(5, 25, 1.35), (-98, -70, 0.75)])
+    reverse_b2_close = make_scan([(5, 25, 1.35), (-98, -70, 0.45)])
+    reverse_b2_receding = make_scan([(5, 25, 1.35), (-98, -70, 0.65)])
+    reverse_single = make_scan([(5, 30, 1.25)])
 
     def step(scan=empty, dt=0.1):
         clock[0] += dt

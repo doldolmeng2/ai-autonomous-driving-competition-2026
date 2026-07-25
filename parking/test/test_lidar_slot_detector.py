@@ -8,6 +8,28 @@ from parking.lidar_slot_detector import (
 from parking.models import SlotSide
 
 
+def test_scan_to_points_uses_rear_zero_vehicle_bearings():
+    points = LidarSlotDetector.scan_to_points(
+        ranges=[1.0, 1.0, 1.0, 1.0],
+        angle_min=-math.pi,
+        angle_increment=math.pi / 2.0,
+        range_min=0.05,
+        range_max=2.0,
+    )
+
+    # -180 front, -90 left, 0 rear, +90 right.
+    np.testing.assert_allclose(
+        points,
+        np.asarray([
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [-1.0, 0.0],
+            [0.0, -1.0],
+        ]),
+        atol=1e-12,
+    )
+
+
 def vertical_segment(x, y_start, y_end, count=40):
     y = np.linspace(y_start, y_end, count)
     return np.column_stack((np.full_like(y, x), y))

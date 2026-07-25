@@ -18,6 +18,13 @@ ros2 launch sensor_topic sensors.launch.py
 `sensors.launch.py` starts `camera_node`, `ultrasonic_node`, `controller_node`,
 and includes the Slamtec A1 launch from `sllidar_ros2`.
 
+LiDAR bearing convention:
+
+```text
+rear 0 deg, right +90 deg, front +/-180 deg, left -90 deg
+(angle increases counter-clockwise)
+```
+
 Device defaults:
 
 ```text

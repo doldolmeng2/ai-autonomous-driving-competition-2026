@@ -1,9 +1,9 @@
 """LiDAR-only parking controller: /scan -> /motor_control.
 
 Scan convention:
-    0 deg = vehicle front, + = vehicle left, - = vehicle right.
-The parking-valid field is |angle| >= configured threshold. It is split only
-by sign into LEFT and RIGHT; quadrant names are not used.
+    0 deg = vehicle rear, +90 deg = right, -90 deg = left,
+    and +/-180 deg = front. Angles increase counter-clockwise.
+The parking-valid field is rear-centered and split by sign into RIGHT and LEFT.
 """
 
 from __future__ import annotations
@@ -92,8 +92,9 @@ class ParkingNodeOsy(Node):
         self.declare_parameter('debug_window_name', 'parking_lidar_sequence_debug')
         self.declare_parameter('debug_hz', 30.0)
 
-        # Parking-valid field: LEFT +threshold..+180, RIGHT -180..-threshold.
-        self.declare_parameter('valid_sector_min_abs_deg', 70.0)
+        # Same physical field as the old |front-zero angle| >= 70 degrees.
+        # In the rear-zero convention it is LEFT -110..0, RIGHT 0..+110.
+        self.declare_parameter('valid_sector_max_abs_deg', 110.0)
         self.declare_parameter('rear_hard_stop_angle_deg', 12.0)
         self.declare_parameter('rear_hard_stop_distance_m', 0.18)
         # Ignore LiDAR returns closer than the sensor/vehicle blind zone.
@@ -146,8 +147,8 @@ class ParkingNodeOsy(Node):
         self.debug_view = bool(self.get_parameter('debug_view').value)
         self.debug_window_name = str(self.get_parameter('debug_window_name').value)
         self.debug_hz = max(1.0, float(self.get_parameter('debug_hz').value))
-        self.valid_sector_min_abs = math.radians(float(
-            self.get_parameter('valid_sector_min_abs_deg').value
+        self.valid_sector_max_abs = math.radians(float(
+            self.get_parameter('valid_sector_max_abs_deg').value
         ))
         self.rear_hard_stop_angle = math.radians(float(
             self.get_parameter('rear_hard_stop_angle_deg').value
@@ -250,7 +251,7 @@ class ParkingNodeOsy(Node):
             self.create_timer(1.0 / self.debug_hz, self.draw_debug)
         self.get_logger().info(
             'parking_node_osy: LiDAR-only /scan -> /motor_control; '
-            'using |angle| >= 70 deg split into LEFT/RIGHT; '
+            'rear-zero convention, using |angle| <= 110 deg split into LEFT/RIGHT; '
             'car1/car2 are counted in the RIGHT valid side'
         )
 
@@ -335,7 +336,7 @@ class ParkingNodeOsy(Node):
             self.reverse_b2_turnaround_detected = False
 
     def observe_rear_car_bundles(self, msg: LaserScan) -> RearObservation:
-        """Cluster the |angle| >= 70-degree field, split into LEFT and RIGHT."""
+        """Cluster the rear-centered field, split into LEFT and RIGHT."""
         left_ordered_points: list[tuple[float, float]] = []
         right_ordered_points: list[tuple[float, float]] = []
         valid_scan_points = 0
@@ -352,15 +353,14 @@ class ParkingNodeOsy(Node):
                 continue
             angle = msg.angle_min + index * msg.angle_increment
             angle = math.atan2(math.sin(angle), math.cos(angle))
-            abs_angle = abs(angle)
-            if abs(abs_angle - math.pi) <= self.rear_hard_stop_angle:
+            if abs(angle) <= self.rear_hard_stop_angle:
                 rear_axis_distances.append(float(distance))
-            if abs(angle) < self.valid_sector_min_abs:
-                continue  # discard the forward-centered invalid field
-            point = (distance * math.cos(angle), distance * math.sin(angle))
-            # Negative angles are the RIGHT valid side and drive the sequential
-            # car1/car2 approach events. Positive angles are LEFT.
-            if angle < 0.0:
+            if abs(angle) > self.valid_sector_max_abs:
+                continue  # discard the front-centered invalid field
+            point = (-distance * math.cos(angle), -distance * math.sin(angle))
+            # Positive angles are RIGHT and drive the sequential car1/car2
+            # approach events. Negative angles are LEFT.
+            if angle > 0.0:
                 right_ordered_points.append(point)
             else:
                 left_ordered_points.append(point)
@@ -785,19 +785,19 @@ class ParkingNodeOsy(Node):
         scale = (size * 0.40) / max(self.cluster_max_range, 0.1)
         image = np.zeros((size, size, 3), dtype=np.uint8)
 
-        # Parking-valid field is |angle| >= 70 degrees, split LEFT/RIGHT.
+        # Parking-valid field is rear-centered and split LEFT/RIGHT.
         radius = int(self.cluster_max_range * scale)
         cv2.circle(image, (center, center), radius, (0, 120, 120), 1)
-        for boundary_angle in (-self.valid_sector_min_abs, self.valid_sector_min_abs):
-            endpoint_x = int(center - math.sin(boundary_angle) * radius)
-            endpoint_y = int(center - math.cos(boundary_angle) * radius)
+        for boundary_angle in (-self.valid_sector_max_abs, self.valid_sector_max_abs):
+            endpoint_x = int(center + math.sin(boundary_angle) * radius)
+            endpoint_y = int(center + math.cos(boundary_angle) * radius)
             cv2.line(image, (center, center), (endpoint_x, endpoint_y),
                      (0, 120, 120), 1)
         cv2.circle(image, (center, center), 8, (0, 255, 0), -1)
         cv2.putText(image, 'CAR', (center + 12, center + 5),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
-        valid_angle_deg = math.degrees(self.valid_sector_min_abs)
-        cv2.putText(image, f'VALID: |ANGLE| >= {valid_angle_deg:.0f} DEG (LEFT / RIGHT)',
+        valid_angle_deg = math.degrees(self.valid_sector_max_abs)
+        cv2.putText(image, f'VALID: |ANGLE| <= {valid_angle_deg:.0f} DEG (LEFT / RIGHT)',
                     (center - 185, center + radius - 12),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 220, 220), 1, cv2.LINE_AA)
 
