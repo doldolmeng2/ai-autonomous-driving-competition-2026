@@ -11,6 +11,16 @@ def generate_launch_description():
     return LaunchDescription([
         Node(
             package='sensor_topic',
+            executable='arduino_communication_node',
+            output='screen',
+            parameters=[{
+                'port': 'auto',
+                'max_steer_pwm': 150,
+                'max_drive_pwm': 130,
+            }],
+        ),
+        Node(
+            package='sensor_topic',
             executable='camera_node',
             output='screen',
             parameters=[str(sensor_topic_share / 'config' / 'camera.yaml')],

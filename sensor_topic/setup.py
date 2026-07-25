@@ -22,6 +22,7 @@ setup(
     entry_points={
         'console_scripts': [
             'camera_node = sensor_topic.camera_node:main',
+            'arduino_communication_node = sensor_topic.arduino_communication_node:main',
             'lidar_node = sensor_topic.lidar_node:main',
             'ultrasonic_node = sensor_topic.ultrasonic_node:main',
             'controller_node = sensor_topic.controller_node:main',

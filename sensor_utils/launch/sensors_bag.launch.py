@@ -28,6 +28,12 @@ def generate_launch_description():
         ),
         Node(
             package='sensor_topic',
+            executable='arduino_communication_node',
+            output='screen',
+            parameters=[{'port': 'auto'}],
+        ),
+        Node(
+            package='sensor_topic',
             executable='ultrasonic_node',
             output='screen',
             parameters=[str(share / 'config' / 'ultrasonic.yaml')],

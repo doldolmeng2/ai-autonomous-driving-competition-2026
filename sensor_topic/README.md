@@ -5,7 +5,8 @@ PDF 기준 센서/컨트롤러 원본 토픽 발행 패키지다.
 | Node | Subscribe | Publish |
 | --- | --- | --- |
 | `camera_node` | - | `/camera/high/image_raw`, `/camera/high/camera_info`, `/camera/low/image_raw`, `/camera/low/camera_info` |
-| `ultrasonic_node` | Arduino serial | `/ultrasonic/range_1` ... `/ultrasonic/range_6`, `/ultrasonic/ranges` |
+| `arduino_communication_node` | `/arduino/motor_command` | `/arduino/ultrasonic_raw` |
+| `ultrasonic_node` | `/arduino/ultrasonic_raw` | `/ultrasonic/range_1` ... `/ultrasonic/range_6`, `/ultrasonic/ranges` |
 | `controller_node` | USB controller device | `/manual_controller/joy` |
 | `sllidar_ros2` launch | RPLidar serial | `/scan` |
 
@@ -15,8 +16,8 @@ Launch:
 ros2 launch sensor_topic sensors.launch.py
 ```
 
-`sensors.launch.py` starts `camera_node`, `ultrasonic_node`, `controller_node`,
-and includes the Slamtec A1 launch from `sllidar_ros2`.
+`sensors.launch.py` starts `arduino_communication_node`, `camera_node`,
+`ultrasonic_node`, `controller_node`, and includes the Slamtec A1 launch.
 
 LiDAR bearing convention:
 

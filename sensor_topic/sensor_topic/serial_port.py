@@ -17,7 +17,7 @@ BAUDRATES = {
 
 
 class SerialPort:
-    """Small POSIX serial wrapper used when pyserial is not installed."""
+    """Small POSIX serial wrapper for the standalone LiDAR node."""
 
     def __init__(self, port, baudrate, timeout=0.02, write_timeout=0.2):
         self.port = port

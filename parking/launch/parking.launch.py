@@ -59,6 +59,20 @@ def generate_launch_description() -> LaunchDescription:
             ],
         ),
         OpaqueFunction(function=start_lidar, kwargs={'sllidar_share': sllidar_share}),
+        # Sole owner of /dev/ttyACM*: motor command TX has priority over
+        # parsing and publishing raw ultrasonic frames.
+        Node(
+            package='sensor_topic',
+            executable='arduino_communication_node',
+            name='parking_arduino_communication',
+            output='screen',
+            parameters=[{
+                'port': 'auto',
+                'baudrate': 115200,
+                'max_steer_pwm': 150,
+                'max_drive_pwm': 130,
+            }],
+        ),
         Node(
             package='sensor_topic',
             executable='ultrasonic_node',
@@ -73,14 +87,14 @@ def generate_launch_description() -> LaunchDescription:
             output='screen',
             parameters=[{'debug_view': True}],
         ),
-        # /motor_control [steer, speed] -> Arduino steering/drive commands.
+        # /motor_control target -> /arduino/motor_command PWM topic.
         Node(
             package='drive_control',
             executable='drive_control_node',
             name='parking_drive_control',
             output='screen',
             parameters=[{
-                'max_drive_pwm': 140,
+                'max_drive_pwm': 130,
                 'steer_pwm': 150,
                 'steer_max_angle_deg': 45.0,
                 'steer_center_time': 0.45,

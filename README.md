@@ -12,7 +12,7 @@ source install/setup.bash
 
 ```bash
 colcon build --symlink-install --packages-select sensor_topic sensor_utils
-colcon build --symlink-install --packages-select drive_control
+colcon build --symlink-install --packages-select sensor_topic drive_control
 colcon build --symlink-install --packages-select lane_offset lane_main parking
 ```
 
@@ -21,6 +21,7 @@ colcon build --symlink-install --packages-select lane_offset lane_main parking
 ```text
 sensor_topic/camera_node -> /camera/high/image_raw
 sensor_topic/camera_node -> /camera/low/image_raw
+sensor_topic/arduino_communication_node -> /arduino/ultrasonic_raw
 sensor_topic/ultrasonic_node -> /ultrasonic/range_1 ... /ultrasonic/range_6
 sllidar_ros2 -> /scan
 sensor_topic/controller_node -> /manual_controller/joy
@@ -35,6 +36,8 @@ Timed lane driving:
 -> lane_main/timed_lane_main_node
 -> /motor_control
 -> drive_control/drive_control_node
+-> /arduino/motor_command
+-> sensor_topic/arduino_communication_node
 ```
 
 Mission lane driving:
@@ -56,6 +59,8 @@ Parking:
 -> parking/parking_node
 -> /motor_control
 -> drive_control/drive_control_node
+-> /arduino/motor_command
+-> sensor_topic/arduino_communication_node
 ```
 
 Controller drive:
@@ -65,6 +70,8 @@ Controller drive:
 -> sensor_utils/joy_to_motor_node
 -> /motor_control
 -> drive_control/drive_control_node
+-> /arduino/motor_command
+-> sensor_topic/arduino_communication_node
 ```
 
 ## Launch
@@ -96,7 +103,7 @@ ros2 launch lane_main mission_lane_main.launch.py
 주차:
 
 ```bash
-ros2 launch parking mission_parking.launch.py
+ros2 launch parking parking.launch.py
 ```
 
 센서 시각화/캘리브레이션/bag:
@@ -120,10 +127,12 @@ ros2 launch sensor_utils bag_visualization.launch.py
 | `/camera/low/camera_info` | `sensor_msgs/CameraInfo` |
 | `/scan` | `sensor_msgs/LaserScan` |
 | `/ultrasonic/range_1` ... `/ultrasonic/range_6` | `sensor_msgs/Range` |
+| `/arduino/ultrasonic_raw` | `std_msgs/Float32MultiArray` |
 | `/manual_controller/joy` | `sensor_msgs/Joy` |
 | `/lane_info` | `std_msgs/Int16` |
 | `/lane_offset` | `std_msgs/Int16` |
 | `/motor_control` | `std_msgs/Int16MultiArray` |
+| `/arduino/motor_command` | `std_msgs/Int16MultiArray` |
 
 ## Device Notes
 
