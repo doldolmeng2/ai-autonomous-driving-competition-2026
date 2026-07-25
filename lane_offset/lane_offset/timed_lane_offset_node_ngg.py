@@ -79,6 +79,19 @@ GREEN_MIN_PIXELS = 150
 GREEN_RIGHT_MARGIN_PX = 5
 
 # ---------------------------------------------------------------------------
+# 위치 연속성(lock 기반) — 초록은 '획득'에만 쓰고 이후엔 흰색 연속성으로 추적
+# ---------------------------------------------------------------------------
+# 초록 검증을 통과해 오른쪽 실선을 한 번 잡으면(lock), 그 뒤로는 초록이 안 보여도
+# 직전 실선 x(last_line_x) 근처의 선 모양 흰 덩어리를 계속 오른쪽 실선으로
+# 추적한다. 초록은 lock이 풀렸을 때(근처에 흰 선이 아예 없어 선을 잃음) 다시
+# 획득하는 데만 쓴다. 이렇게 하면 초록이 오래/계속 안 보여도 실제 흰 선이 있는
+# 한 무기한 추적한다. 프레임 수 제한(예산)은 두지 않는다.
+# 드리프트 방지는 아래 좁은 x-창이 담당한다: 직전 실선 x 로부터 이 픽셀 이내의
+# 덩어리만 lock 추적 대상으로 인정해, lock 중 중앙 점선 등으로 위치가 튀는 것을
+# 막는다.
+LOCK_X_WINDOW_PX = 30
+
+# ---------------------------------------------------------------------------
 # 흰색 덩어리 모양 필터(초록 매트 위 흰 꽃 그림 등 제외)
 # ---------------------------------------------------------------------------
 MIN_COMPONENT_AREA = 150      # 너무 작은 덩어리 제외
@@ -134,6 +147,7 @@ class TimedLaneOffsetNggNode(Node):
         self.declare_parameter('green_near_distance_px', GREEN_NEAR_DISTANCE_PX)
         self.declare_parameter('green_min_pixels', GREEN_MIN_PIXELS)
         self.declare_parameter('green_right_margin_px', GREEN_RIGHT_MARGIN_PX)
+        self.declare_parameter('lock_x_window_px', LOCK_X_WINDOW_PX)
         self.declare_parameter('min_component_area', MIN_COMPONENT_AREA)
         self.declare_parameter('min_line_height_px', MIN_LINE_HEIGHT_PX)
         self.declare_parameter('min_line_aspect_ratio', MIN_LINE_ASPECT_RATIO)
@@ -158,6 +172,7 @@ class TimedLaneOffsetNggNode(Node):
         # 런타임 상태
         self.last_offset = 0.0
         self.last_line_x = None          # 직전 프레임의 오른쪽 실선 측정 x
+        self.locked = False              # 초록으로 획득해 추적 중인지(lock 상태)
         self.publish_debug_image = True
 
         qos = QoSProfile(
@@ -191,6 +206,7 @@ class TimedLaneOffsetNggNode(Node):
         self.green_near_distance_px = max(1, int(get('green_near_distance_px')))
         self.green_min_pixels = int(get('green_min_pixels'))
         self.green_right_margin_px = float(get('green_right_margin_px'))
+        self.lock_x_window_px = max(1, int(get('lock_x_window_px')))
         self.min_component_area = int(get('min_component_area'))
         self.min_line_height_px = int(get('min_line_height_px'))
         self.min_line_aspect_ratio = float(get('min_line_aspect_ratio'))
@@ -309,11 +325,15 @@ class TimedLaneOffsetNggNode(Node):
           그 초록의 평균 x가 덩어리 평균 x보다 오른쪽이어야 오른쪽 실선으로 인정한다.
           (중앙 점선은 양옆이 아스팔트라 여기서 걸러진다.)
         - 여러 개면 직전 측정 x에 가장 가까운 것을, 없으면 가장 큰 것을 고른다.
+        - 초록으로 한 번 잡으면(lock) 그 뒤로는 초록 근거 후보가 없어도, 직전 실선
+          x(last_line_x) 근처의 선 모양 덩어리를 계속 오른쪽 실선으로 추적한다.
+          근처에 선 모양 덩어리가 아예 없을 때만 lock을 풀고 다시 초록을 요구한다.
         """
         num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
             white_mask, connectivity=8
         )
         if num_labels <= 1:
+            self.locked = False
             return None, None, 'none', 'no white component'
 
         kernel_size = self.green_near_distance_px * 2 + 1
@@ -322,8 +342,8 @@ class TimedLaneOffsetNggNode(Node):
         )
         green_bool = green_mask > 0
 
-        best = None  # (score, label)
-        shape_pass = 0
+        best = None  # (score, label) — 초록 근거를 통과한 후보
+        shape_candidates = []  # 모양 필터만 통과한 (label, comp_mean_x) — lock 추적용
         for label in range(1, num_labels):
             x, y, w, h, area = stats[label]
             if area < self.min_component_area:
@@ -332,7 +352,8 @@ class TimedLaneOffsetNggNode(Node):
                 continue
             if w > 0 and (h / float(w)) < self.min_line_aspect_ratio:
                 continue
-            shape_pass += 1
+            comp_mean_x = float(centroids[label][0])
+            shape_candidates.append((label, comp_mean_x))
 
             comp = labels == label
             neighborhood = cv2.dilate(comp.astype(np.uint8), kernel) > 0
@@ -342,7 +363,6 @@ class TimedLaneOffsetNggNode(Node):
                 continue
             # 초록이 덩어리보다 오른쪽에 있어야 한다.
             green_mean_x = float(np.nonzero(green_near)[1].mean())
-            comp_mean_x = float(centroids[label][0])
             if green_mean_x < comp_mean_x + self.green_right_margin_px:
                 continue
 
@@ -353,17 +373,43 @@ class TimedLaneOffsetNggNode(Node):
             if best is None or score > best[0]:
                 best = (score, label)
 
-        if best is None:
+        # 초록 근거 후보가 있으면 그것으로 (재)획득하고 lock 을 건다.
+        if best is not None:
+            self.locked = True
+            line_mask = (labels == best[1]).astype(np.uint8) * 255
+            measured_x, mode = self.measure_near_x(line_mask)
+            if measured_x is None:
+                return line_mask, None, mode, 'near band empty'
+            return line_mask, measured_x, mode, ''
+
+        # --- 초록 근거 후보 없음 ---
+        # lock 이 걸려 있으면(이미 초록으로 획득함), 초록이 안 보여도 직전 실선 x
+        # 근처의 선 모양 덩어리를 계속 오른쪽 실선으로 추적한다(무기한). 근처에
+        # 덩어리가 아예 없을 때만 선을 잃은 것으로 보고 lock 을 풀어 재획득을 기다린다.
+        if not self.locked or self.last_line_x is None:
             reason = (
-                'no green-backed line' if shape_pass else 'no line-shaped component'
+                'no green-backed line' if shape_candidates
+                else 'no line-shaped component'
             )
             return None, None, 'none', reason
 
-        line_mask = (labels == best[1]).astype(np.uint8) * 255
+        lock_label, lock_dx = None, None
+        for label, comp_mean_x in shape_candidates:
+            dx = abs(comp_mean_x - self.last_line_x)
+            if dx > self.lock_x_window_px:
+                continue
+            if lock_dx is None or dx < lock_dx:
+                lock_label, lock_dx = label, dx
+        if lock_label is None:
+            # 직전 위치 근처에 흰 선이 아예 없음 -> 선을 잃음. lock 해제, 재획득 대기.
+            self.locked = False
+            return None, None, 'none', 'lock lost (no line near last_x)'
+
+        line_mask = (labels == lock_label).astype(np.uint8) * 255
         measured_x, mode = self.measure_near_x(line_mask)
         if measured_x is None:
-            return line_mask, None, mode, 'near band empty'
-        return line_mask, measured_x, mode, ''
+            return line_mask, None, 'lock/' + mode, 'near band empty'
+        return line_mask, measured_x, 'lock/' + mode, ''
 
     def measure_near_x(self, line_mask):
         """실선 중 차량과 y축으로 가장 가까운 구간의 x를 median으로 잰다.
@@ -484,6 +530,7 @@ class TimedLaneOffsetNggNode(Node):
             f'offset: {raw_offset if raw_offset is not None else "--"} '
             f'(smoothed {self.last_offset:.1f})',
             f'green: min_px={self.green_min_pixels} near={self.green_near_distance_px}',
+            f'lock: {"ON" if self.locked else "off"} win={self.lock_x_window_px}',
         ]
         for i, text in enumerate(lines):
             cv2.putText(
