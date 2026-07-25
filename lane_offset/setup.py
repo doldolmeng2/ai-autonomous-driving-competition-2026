@@ -25,6 +25,7 @@ setup(
             'mission_lane_offset_node = lane_offset.mission_lane_offset_node:main',
             'mission_lane_offset_node_osy = lane_offset.mission_lane_offset_node_osy:main',
             'lane_offset_debug_viewer_node = lane_offset.lane_offset_debug_viewer_node:main',
+            'color_segment_bev_node = lane_offset.color_segment_bev_node:main',
         ],
     },
 )

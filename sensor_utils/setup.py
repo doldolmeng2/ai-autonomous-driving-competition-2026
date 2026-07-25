@@ -29,6 +29,8 @@ setup(
             'camera_calibration_node = sensor_utils.camera_calibration_node:main',
             'camera_pose_check_node = sensor_utils.camera_pose_check_node:main',
             'hsv_tuner_node = sensor_utils.hsv_tuner_node:main',
+            'ycrcb_hsv_tuner_node = sensor_utils.ycrcb_hsv_tuner_node:main',
+            'color_segment_node = sensor_utils.color_segment_node:main',
         ],
     },
 )
