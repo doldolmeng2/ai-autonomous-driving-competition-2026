@@ -114,6 +114,11 @@ GREEN_RIGHT_MARGIN_PX = -1000
 MIN_COMPONENT_AREA = 50      # 너무 작은 덩어리 제외
 MIN_LINE_HEIGHT_PX = 25       # 세로로 어느 정도 길어야 실선
 MIN_LINE_ASPECT_RATIO = 0.0   # 세로/가로 비. 동글동글한 꽃 그림 배제
+# 꽃처럼 작고 뭉툭한 흰색 객체만 제외한다. 큰 객체에는 적용하지 않으므로
+# 회전 구간의 긴 대각선 차선이 축 정렬 bbox상 넓어 보여도 제거되지 않는다.
+SMALL_COMPACT_MAX_AREA = 1800
+SMALL_COMPACT_MAX_SIDE_PX = 90
+SMALL_COMPACT_MIN_ELONGATION = 2.0
 
 # ---------------------------------------------------------------------------
 # 조향 기준
@@ -211,6 +216,15 @@ class TimedLaneOffsetNggNode(Node):
         self.declare_parameter('min_component_area', MIN_COMPONENT_AREA)
         self.declare_parameter('min_line_height_px', MIN_LINE_HEIGHT_PX)
         self.declare_parameter('min_line_aspect_ratio', MIN_LINE_ASPECT_RATIO)
+        self.declare_parameter(
+            'small_compact_max_area', SMALL_COMPACT_MAX_AREA
+        )
+        self.declare_parameter(
+            'small_compact_max_side_px', SMALL_COMPACT_MAX_SIDE_PX
+        )
+        self.declare_parameter(
+            'small_compact_min_elongation', SMALL_COMPACT_MIN_ELONGATION
+        )
         self.declare_parameter('target_right_x', TARGET_RIGHT_X)
         self.declare_parameter(
             'right_green_stable_frames', RIGHT_GREEN_STABLE_FRAMES
@@ -311,6 +325,15 @@ class TimedLaneOffsetNggNode(Node):
         self.min_component_area = int(get('min_component_area'))
         self.min_line_height_px = int(get('min_line_height_px'))
         self.min_line_aspect_ratio = float(get('min_line_aspect_ratio'))
+        self.small_compact_max_area = max(
+            0, int(get('small_compact_max_area'))
+        )
+        self.small_compact_max_side_px = max(
+            0, int(get('small_compact_max_side_px'))
+        )
+        self.small_compact_min_elongation = max(
+            1.0, float(get('small_compact_min_elongation'))
+        )
         self.target_right_x = int(get('target_right_x'))
         self.right_green_stable_frames = max(
             1, int(get('right_green_stable_frames'))
@@ -662,9 +685,20 @@ class TimedLaneOffsetNggNode(Node):
                 continue
             if w > 0 and (h / float(w)) < self.min_line_aspect_ratio:
                 continue
+
+            # 실제 회전 차선은 축 정렬 bbox만 보면 넓어질 수 있으므로
+            # minAreaRect의 긴 변/짧은 변으로 길쭉함을 판단한다. 단, 이
+            # 필터는 작은 객체에만 적용해 큰 대각선 차선을 보호한다.
+            comp = labels == label
+            if (
+                area <= self.small_compact_max_area
+                and max(w, h) <= self.small_compact_max_side_px
+                and self.component_elongation(comp)
+                < self.small_compact_min_elongation
+            ):
+                continue
             shape_pass += 1
 
-            comp = labels == label
             neighborhood = cv2.dilate(comp.astype(np.uint8), kernel) > 0
             green_near = green_bool & neighborhood
             green_count = int(np.count_nonzero(green_near))
@@ -694,6 +728,20 @@ class TimedLaneOffsetNggNode(Node):
         if measured_x is None:
             return line_mask, None, mode, 'near band empty'
         return line_mask, measured_x, mode, ''
+
+    @staticmethod
+    def component_elongation(component_mask):
+        """Return rotated long-side/short-side ratio for one component."""
+        ys, xs = np.nonzero(component_mask)
+        if len(xs) < 3:
+            return 1.0
+        points = np.column_stack((xs, ys)).astype(np.float32)
+        side_a, side_b = cv2.minAreaRect(points)[1]
+        long_side = max(float(side_a), float(side_b))
+        short_side = min(float(side_a), float(side_b))
+        if short_side < 1.0:
+            return long_side
+        return long_side / short_side
 
     def measure_near_x(self, line_mask):
         """실선 중 차량과 y축으로 가장 가까운 구간의 x를 median으로 잰다.

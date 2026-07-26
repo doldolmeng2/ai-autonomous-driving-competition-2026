@@ -19,7 +19,7 @@ LANE_OFFSET_TOPIC = '/lane_offset'
 MOTOR_CONTROL_TOPIC = '/motor_control'
 
 # 순항 속도(PWM). 실차 트랙에서 반드시 재조정 필요.
-BASE_SPEED = 140
+BASE_SPEED = 170
 # steer 값 clamp 범위 (-MAX_STEER ~ +MAX_STEER)
 MAX_STEER = 45
 

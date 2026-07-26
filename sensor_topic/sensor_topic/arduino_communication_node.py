@@ -69,7 +69,7 @@ class ArduinoCommunicationNode(Node):
         self.declare_parameter('command_rate_hz', 20.0)
         self.declare_parameter('command_timeout_sec', 0.5)
         self.declare_parameter('max_steer_pwm', 150)
-        self.declare_parameter('max_drive_pwm', 140)
+        self.declare_parameter('max_drive_pwm', 170)
         self.declare_parameter('debug_serial_lines', False)
 
         self.port = str(self.get_parameter('port').value)

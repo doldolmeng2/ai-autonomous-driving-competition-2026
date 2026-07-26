@@ -32,7 +32,7 @@ constexpr uint8_t ROTATION_SENSOR_PIN = A1;
 constexpr uint8_t ROTATION_SAMPLE_COUNT = 8;
 
 constexpr int MAX_STEER_PWM = 150;
-constexpr int MAX_DRIVE_PWM = 140;
+constexpr int MAX_DRIVE_PWM = 170;
 constexpr unsigned long COMMAND_TIMEOUT_MS = 500;
 constexpr unsigned long SENSOR_PERIOD_MS = 180;
 constexpr unsigned long ECHO_TIMEOUT_US = 20000;
