@@ -58,9 +58,9 @@ class MissionLaneMainNode(Node):
         driving_mode = str(self.get_parameter('driving_mode').value).lower()
         if driving_mode not in ('1lane', '2lane'):
             self.get_logger().warn(
-                f"Unknown driving_mode='{driving_mode}'; using '1lane'"
+                f"Unknown driving_mode='{driving_mode}'; using '2lane'"
             )
-            driving_mode = '1lane'
+            driving_mode = '2lane'
         self.lane_number = 1 if driving_mode == '1lane' else 2
         self.lane_change_close_distance = max(
             0.0,

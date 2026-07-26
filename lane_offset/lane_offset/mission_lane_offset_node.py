@@ -62,18 +62,18 @@ NEAR_FIELD_ROWS = 100
 # 근접 밴드에서 흰색 비율이 이 값을 넘으면 횡단보도 등으로 판단하고 무시
 WHITE_OVERLOAD_RATIO = 0.15
 
-# 1차선에서 시작하며 /lane_info가 바뀌면 모드별 기준값으로 전환한다.
+# 2차선에서 시작하며 /lane_info가 바뀌면 모드별 기준값으로 전환한다.
 DRIVING_MODE = '1lane'
 # 640px BEV에서 차가 정상 위치일 때 보이는 중앙 점선의 x좌표.
 # 1차선은 화면 오른쪽 점선, 2차선은 화면 왼쪽 점선을 각각 기준으로 삼는다.
-DASHED_REFERENCE_X_PX_2LANE = 208
-DASHED_REFERENCE_X_PX_1LANE = 500
+DASHED_REFERENCE_X_PX_2LANE = 108
+DASHED_REFERENCE_X_PX_1LANE = 570
 # 기준선과 이만큼 차이 나면 lane_offset의 최대/최소값(+/-45)에 도달한다.
 OFFSET_ERROR_LIMIT_PX = 195
 LANE_OFFSET_LIMIT = 45
 # 기준선 오차에 비례해 조향하도록 1.0을 사용한다. 10.0은 약 20px 오차만
 # 생겨도 바로 +/-45로 포화되어 "떨어진 만큼" 조향하지 못한다.
-OFFSET_KP = 1.0
+OFFSET_KP = 2.0
 # 한 프레임 사이 offset이 이 값보다 더 튀면 오검출로 보고 이전 값 유지
 MAX_OFFSET_JUMP_PX = 80
 
@@ -91,6 +91,9 @@ DASH_MAX_AVERAGE_WIDTH_PX = 40.0
 DASH_MIN_COMPONENT_PIXELS = 80
 # ROI 높이 대부분을 계속 잇는 성분은 점선이 아니라 실선으로 본다.
 DASH_MAX_VERTICAL_SPAN_RATIO = 0.92
+# 서로 다른 높이에 나타나는 위/아래 점선 조각을 한 트랙으로 묶는다.
+DASH_MAX_TRACKED_PIECES = 2
+DASH_MAX_VERTICAL_OVERLAP_RATIO = 0.25
 # 이전 프레임의 검출 위치를 다음 프레임 윈도우 시작점에 반영하는 비율.
 # 0.20이면 한 프레임에 차이의 20%만 움직여 급격한 점프를 막는다.
 WINDOW_START_ADAPT_RATE = 0.7
@@ -174,6 +177,13 @@ class MissionLaneOffsetNode(Node):
         )
         self.declare_parameter(
             'dash_max_vertical_span_ratio', DASH_MAX_VERTICAL_SPAN_RATIO
+        )
+        self.declare_parameter(
+            'dash_max_tracked_pieces', DASH_MAX_TRACKED_PIECES
+        )
+        self.declare_parameter(
+            'dash_max_vertical_overlap_ratio',
+            DASH_MAX_VERTICAL_OVERLAP_RATIO,
         )
         self.declare_parameter('window_min_component_pixels', WINDOW_MIN_COMPONENT_PIXELS)
         self.declare_parameter('window_start_adapt_rate', WINDOW_START_ADAPT_RATE)
@@ -270,6 +280,14 @@ class MissionLaneOffsetNode(Node):
         )
         self.dash_max_vertical_span_ratio = float(np.clip(
             self.get_parameter('dash_max_vertical_span_ratio').value,
+            0.0,
+            1.0,
+        ))
+        self.dash_max_tracked_pieces = max(
+            1, int(self.get_parameter('dash_max_tracked_pieces').value)
+        )
+        self.dash_max_vertical_overlap_ratio = float(np.clip(
+            self.get_parameter('dash_max_vertical_overlap_ratio').value,
             0.0,
             1.0,
         ))
@@ -639,19 +657,47 @@ class MissionLaneOffsetNode(Node):
             else:
                 bottom_x = float(centroids[label][0])
             distance = abs(bottom_x - float(expected_x))
-            if distance <= self.dashed_window_margin:
+            bbox_distance = max(
+                float(x) - float(expected_x),
+                float(expected_x) - float(x + w - 1),
+                0.0,
+            )
+            if min(distance, bbox_distance) <= self.dashed_window_margin:
                 candidates.append((distance, bottom_x, label, x, y, w, h))
 
         if not candidates:
             return None, []
 
-        # 차선 번호가 바뀌어도 직전 추적 x(expected_x)에 가장 가까운 성분을
-        # 선택한다. 새 차로 기준 x로 즉시 점프해 주변 실선을 잡지 않게 한다.
-        selected = min(candidates, key=lambda candidate: candidate[0])
-        _distance, _bottom_x, selected_label, x, y, w, h = selected
+        # 하단 점선 조각을 기준으로 잡고, y구간이 겹치지 않는 위쪽/아래쪽
+        # 조각도 같은 트랙에 추가한다. 같은 높이의 평행 실선은 제외된다.
+        primary = min(candidates, key=lambda candidate: candidate[0])
+        selected = [primary]
+        for candidate in sorted(candidates, key=lambda item: item[0]):
+            if candidate is primary:
+                continue
+            _distance, _bottom_x, _label, _x, y, _w, h = candidate
+            vertically_separate = True
+            for chosen in selected:
+                chosen_y, chosen_h = chosen[4], chosen[6]
+                overlap = max(
+                    0,
+                    min(y + h, chosen_y + chosen_h) - max(y, chosen_y),
+                )
+                overlap_ratio = overlap / float(min(h, chosen_h))
+                if overlap_ratio > self.dash_max_vertical_overlap_ratio:
+                    vertically_separate = False
+                    break
+            if vertically_separate:
+                selected.append(candidate)
+            if len(selected) >= self.dash_max_tracked_pieces:
+                break
+
         filtered = np.zeros_like(white_mask)
-        filtered[labels == selected_label] = 255
-        return filtered, [(int(x), int(y), int(w), int(h))]
+        boxes = []
+        for _distance, _bottom_x, label, x, y, w, h in selected:
+            filtered[labels == label] = 255
+            boxes.append((int(x), int(y), int(w), int(h)))
+        return filtered, boxes
 
     def get_window_start_x(self, lane_name, fallback_x):
         """저장된 시작점이 있으면 사용하고, 첫 프레임만 색/모드 기준값을 쓴다."""
