@@ -16,7 +16,7 @@ def generate_launch_description():
             parameters=[{
                 'port': 'auto',
                 'max_steer_pwm': 150,
-                'max_drive_pwm': 170,
+                'max_drive_pwm': 230,
             }],
         ),
         Node(
@@ -41,7 +41,7 @@ def generate_launch_description():
             executable='timed_lane_main_node',
             output='screen',
             parameters=[{
-                'base_speed': 170,
+                'base_speed': 230,
                 'max_steer': 45,
             }],
         ),
@@ -50,7 +50,7 @@ def generate_launch_description():
             executable='drive_control_node',
             output='screen',
             parameters=[{
-                'max_drive_pwm': 170,
+                'max_drive_pwm': 230,
                 'steer_pwm': 150,
                 'steering_control_mode': 'pid',
                 'steer_max_angle_deg': 45.0,
