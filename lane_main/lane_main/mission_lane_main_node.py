@@ -14,9 +14,11 @@ LANE_INFO_TOPIC = '/lane_info'
 MOTOR_CONTROL_TOPIC = '/motor_control'
 BASE_SPEED = 120
 MAX_STEER = 45
-DRIVING_MODE = '2lane'
+DRIVING_MODE = '1lane'
 LANE_CHANGE_CLOSE_DISTANCE = 0.6
 LANE_CHANGE_CLEAR_DISTANCE = 1.0
+LANE_CHANGE_CLOSE_CONFIRM_SAMPLES = 5
+LANE_CHANGE_CLEAR_CONFIRM_SAMPLES = 3
 
 
 class MissionLaneMainNode(Node):
@@ -42,15 +44,23 @@ class MissionLaneMainNode(Node):
         self.declare_parameter(
             'lane_change_clear_distance', LANE_CHANGE_CLEAR_DISTANCE
         )
+        self.declare_parameter(
+            'lane_change_close_confirm_samples',
+            LANE_CHANGE_CLOSE_CONFIRM_SAMPLES,
+        )
+        self.declare_parameter(
+            'lane_change_clear_confirm_samples',
+            LANE_CHANGE_CLEAR_CONFIRM_SAMPLES,
+        )
 
         self.base_speed = int(self.get_parameter('base_speed').value)
         self.max_steer = int(self.get_parameter('max_steer').value)
         driving_mode = str(self.get_parameter('driving_mode').value).lower()
         if driving_mode not in ('1lane', '2lane'):
             self.get_logger().warn(
-                f"Unknown driving_mode='{driving_mode}'; using '2lane'"
+                f"Unknown driving_mode='{driving_mode}'; using '1lane'"
             )
-            driving_mode = '2lane'
+            driving_mode = '1lane'
         self.lane_number = 1 if driving_mode == '1lane' else 2
         self.lane_change_close_distance = max(
             0.0,
@@ -59,6 +69,14 @@ class MissionLaneMainNode(Node):
         self.lane_change_clear_distance = max(
             self.lane_change_close_distance,
             float(self.get_parameter('lane_change_clear_distance').value),
+        )
+        self.lane_change_close_confirm_samples = max(
+            1,
+            int(self.get_parameter('lane_change_close_confirm_samples').value),
+        )
+        self.lane_change_clear_confirm_samples = max(
+            1,
+            int(self.get_parameter('lane_change_clear_confirm_samples').value),
         )
 
         qos = QoSProfile(
@@ -88,6 +106,8 @@ class MissionLaneMainNode(Node):
         self.low_image = None
         self.ultrasonic_ranges = {}
         self.lane_change_armed = False
+        self.close_sample_count = 0
+        self.clear_sample_count = 0
         # lane_offset 노드가 어느 순서로 시작해도 현재 모드를 받을 수 있도록
         # 주기적으로 lane_info를 발행한다.
         self.create_timer(0.2, self.publish_lane_info)
@@ -111,36 +131,52 @@ class MissionLaneMainNode(Node):
         self.update_lane_change(sensor_index, distance)
 
     def update_lane_change(self, sensor_index, distance):
-        """근접 후 이탈하는 초음파 물체를 기준으로 차선을 한 번 전환한다."""
-        # timeout/no-echo는 ultrasonic_node에서 inf로 정규화된다. 센서 오류를
-        # "1m 밖으로 이탈"한 것으로 오인하지 않도록 유한한 측정만 사용한다.
-        if not math.isfinite(distance) or distance < 0.0:
-            return False
-
+        """연속 근접 후 연속 이탈한 물체를 추월한 것으로 보고 차선을 전환한다."""
         active_sensor = 3 if self.lane_number == 2 else 4
         if sensor_index != active_sensor:
             return False
 
-        if distance <= self.lane_change_close_distance:
-            if not self.lane_change_armed:
-                self.get_logger().info(
-                    f'{self.driving_mode}: ultrasonic {active_sensor} '
-                    f'close ({distance:.2f} m); lane change armed'
-                )
-            self.lane_change_armed = True
+        # timeout/no-echo는 ultrasonic_node에서 inf로 정규화된다. 센서 오류를
+        # "1m 밖으로 이탈"한 것으로 오인하지 않도록 유한한 측정만 사용한다.
+        if not math.isfinite(distance) or distance < 0.0:
+            self.close_sample_count = 0
+            self.clear_sample_count = 0
             return False
 
-        if (
-            self.lane_change_armed
-            and distance > self.lane_change_clear_distance
-        ):
+        if not self.lane_change_armed:
+            if distance <= self.lane_change_close_distance:
+                self.close_sample_count += 1
+            else:
+                self.close_sample_count = 0
+
+            if (
+                self.close_sample_count
+                >= self.lane_change_close_confirm_samples
+            ):
+                self.lane_change_armed = True
+                self.close_sample_count = 0
+                self.clear_sample_count = 0
+                self.get_logger().info(
+                    f'{self.driving_mode}: ultrasonic {active_sensor} '
+                    f'close confirmed ({distance:.2f} m); lane change armed'
+                )
+            return False
+
+        if distance > self.lane_change_clear_distance:
+            self.clear_sample_count += 1
+        else:
+            self.clear_sample_count = 0
+
+        if self.clear_sample_count >= self.lane_change_clear_confirm_samples:
             previous_mode = self.driving_mode
             self.lane_number = 1 if self.lane_number == 2 else 2
             self.lane_change_armed = False
+            self.close_sample_count = 0
+            self.clear_sample_count = 0
             self.publish_lane_info()
             self.get_logger().info(
                 f'Lane change trigger: ultrasonic {active_sensor} '
-                f'cleared ({distance:.2f} m); '
+                f'clear confirmed ({distance:.2f} m); '
                 f'{previous_mode} -> {self.driving_mode}'
             )
             return True
@@ -170,4 +206,5 @@ def main(args=None):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
