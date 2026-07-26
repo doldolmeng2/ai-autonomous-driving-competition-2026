@@ -1,91 +1,29 @@
-from pathlib import Path
-
-from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, LogInfo, OpaqueFunction
-from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
-
-
-def find_lidar_port():
-    """Prefer stable by-id LiDAR path; never select the ultrasonic Arduino."""
-    by_id = Path('/dev/serial/by-id')
-    if by_id.is_dir():
-        for device in sorted(by_id.iterdir()):
-            if 'arduino' not in device.name.lower():
-                return str(device)
-    ports = sorted(Path('/dev').glob('ttyUSB*'))
-    return str(ports[0]) if ports else None
-
-
-def start_lidar(context, *, sllidar_share):
-    requested = LaunchConfiguration('lidar_serial_port').perform(context)
-    port = find_lidar_port() if requested == 'auto' else requested
-    if not port:
-        return [LogInfo(msg='[parking] LiDAR device not found; sllidar_node skipped.')]
-    return [
-        LogInfo(msg=f'[parking] Starting SLLidar on {port}'),
-        IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(
-                str(sllidar_share / 'launch' / 'sllidar_a1_launch.py')
-            ),
-            launch_arguments={
-                'serial_port': port,
-                'serial_baudrate': LaunchConfiguration('lidar_baudrate').perform(context),
-                'frame_id': 'laser',
-            }.items(),
-        ),
-    ]
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description() -> LaunchDescription:
-    sensor_topic_share = Path(get_package_share_directory('sensor_topic'))
-    sllidar_share = Path(get_package_share_directory('sllidar_ros2'))
     return LaunchDescription([
-        DeclareLaunchArgument('lidar_serial_port', default_value='auto'),
-        DeclareLaunchArgument('lidar_baudrate', default_value='115200'),
-
-        # Parking owns the sensor drivers it needs: high camera, LiDAR, and
-        # ultrasonic. Low camera/controller are deliberately not started.
-        Node(
-            package='sensor_topic',
-            executable='camera_node',
-            name='parking_high_camera',
-            output='screen',
-            parameters=[
-                str(sensor_topic_share / 'config' / 'camera.yaml'),
-                {'enable_high': True, 'enable_low': False},
-            ],
-        ),
-        OpaqueFunction(function=start_lidar, kwargs={'sllidar_share': sllidar_share}),
-        # Sole owner of /dev/ttyACM*: motor command TX has priority over
-        # parsing and publishing raw ultrasonic frames.
-        Node(
-            package='sensor_topic',
-            executable='arduino_communication_node',
-            name='parking_arduino_communication',
-            output='screen',
-            parameters=[{
-                'port': 'auto',
-                'baudrate': 115200,
-                'max_steer_pwm': 150,
-                'max_drive_pwm': 130,
-            }],
-        ),
-        Node(
-            package='sensor_topic',
-            executable='ultrasonic_node',
-            name='parking_ultrasonic',
-            output='screen',
-            parameters=[str(sensor_topic_share / 'config' / 'ultrasonic.yaml')],
-        ),
+        DeclareLaunchArgument('debug_view', default_value='true'),
+        DeclareLaunchArgument('start_mode', default_value='recognition'),
+        # Sensor drivers are owned by sensor_topic/sensors.launch.py.
+        # This launch only consumes their topics; it must not reopen camera,
+        # LiDAR, or Arduino devices.
         Node(
             package='parking',
             executable='parking_node_yym',
             name='parking_node_yym',
             output='screen',
-            parameters=[{'debug_view': True}],
+            parameters=[{
+                'debug_view': ParameterValue(
+                    LaunchConfiguration('debug_view'),
+                    value_type=bool,
+                ),
+                'start_mode': LaunchConfiguration('start_mode'),
+            }],
         ),
         # /motor_control target -> /arduino/motor_command PWM topic.
         Node(

@@ -3,12 +3,14 @@
 Scan convention used by this vehicle:
     rear=0 deg, right=+90 deg, front=+/-180 deg, left=-90 deg.
 
-The controller approaches straight and, when the first parked vehicle is
-confirmed, performs a calibrated 90-degree left turn relative to its starting
-heading.  Parked-vehicle orientation is deliberately not used during this
-recognition phase.  It then reverses between the two parked vehicles. During
-reverse it continuously targets the middle of the free gap. Parking ends when
-no valid LiDAR points remain below the LiDAR's horizontal x=0 line.
+The controller approaches at an explicit 0-degree steering target and, when
+the first parked vehicle is confirmed, performs a calibrated left turn. LiDAR
+then confirms that both parked vehicles are visible and performs one-second
+LiDAR midpoint corrections while reversing. Distinct vehicles reaching the
+LiDAR -90/+90-degree side gates arms the completion check, but does not change
+the one-second correction mode. When both side rays later change from the
+nearby parked vehicles to far background returns, the vehicle stops, drives
+forward, turns right, and continues straight.
 """
 
 from __future__ import annotations
@@ -101,13 +103,13 @@ class ParkingNodeYym(Node):
         self.declare_parameter('debug_view', True)
         self.declare_parameter('debug_window_name', 'parking_yym_debug')
         self.declare_parameter('debug_hz', 20.0)
-        self.declare_parameter('debug_max_range_m', 3.0)
+        self.declare_parameter('debug_max_range_m', 4.0)
         self.declare_parameter('debug_image_size', 820)
 
         # Only the rear and side field is relevant after the left entry turn.
         self.declare_parameter('valid_sector_max_abs_deg', 125.0)
         self.declare_parameter('parking_min_range_m', 0.15)
-        self.declare_parameter('cluster_max_range_m', 3.0)
+        self.declare_parameter('cluster_max_range_m', 4.0)
         self.declare_parameter('cluster_neighbor_distance_m', 0.20)
         self.declare_parameter('cluster_min_points', 7)
         self.declare_parameter('obstacle_min_extent_m', 0.22)
@@ -124,11 +126,25 @@ class ParkingNodeYym(Node):
         self.declare_parameter('turn_speed', 110)
         self.declare_parameter('reverse_speed', -110)
         self.declare_parameter('left_max_steer_deg', -45)
+        # Seeing distinct vehicles at both +/-90-degree LiDAR gates arms the
+        # completion check. The regular one-second midpoint correction cycle
+        # continues unchanged until both raw side windows see far background.
+        self.declare_parameter('lidar_side_gate_half_width_deg', 15.0)
+        self.declare_parameter('lidar_side_gate_min_points', 3)
+        self.declare_parameter('lidar_side_gate_confirm_frames', 3)
+        self.declare_parameter('lidar_side_far_distance_m', 2.0)
+        self.declare_parameter('lidar_side_far_half_width_deg', 5.0)
+        self.declare_parameter('lidar_side_far_confirm_frames', 3)
+        self.declare_parameter('lidar_side_far_stop_sec', 4.0)
+        self.declare_parameter('exit_forward_duration_sec', 3.0)
+        self.declare_parameter('exit_right_turn_duration_sec', 8.0)
+        self.declare_parameter('exit_right_steer_deg', 45)
+        self.declare_parameter('exit_speed', 110)
         # No parking-specific steering cap: calculated reverse steering may
         # use the vehicle's full physical command range of +/-45 degrees.
         # Multiply every LiDAR-calculated reverse angle by this gain before
         # publishing it through /motor_control.
-        self.declare_parameter('reverse_steer_multiplier', 3)
+        self.declare_parameter('reverse_steer_multiplier', 10)
         self.declare_parameter('steer_settle_sec', 0.6)
         # Recognition test: after steering settles at -45 degrees, drive for
         # this calibrated duration with maximum left steering, then stop.
@@ -140,7 +156,9 @@ class ParkingNodeYym(Node):
         # Zero disables the elapsed-time stop. Parking depth is determined by
         # the rear-half LiDAR point condition below, not a guessed duration.
         self.declare_parameter('reverse_timeout_sec', 0.0)
-        self.declare_parameter('reverse_segment_duration_sec', 2.0)
+        # Reverse for one second, then stop and recompute the LiDAR-based
+        # center/steering target before the next segment.
+        self.declare_parameter('reverse_segment_duration_sec', 1.0)
         self.declare_parameter('reverse_measure_stop_sec', 0.4)
         self.declare_parameter('vehicle_pair_track_max_jump_m', 1.25)
         # Green horizontal line is x=0 at the rear-mounted LiDAR. Stop with
@@ -227,6 +245,37 @@ class ParkingNodeYym(Node):
         self.turn_speed = int(self._value('turn_speed'))
         self.reverse_speed = -abs(int(self._value('reverse_speed')))
         self.left_max_steer = -abs(int(self._value('left_max_steer_deg')))
+        self.lidar_side_gate_half_width = math.radians(max(
+            1.0, float(self._value('lidar_side_gate_half_width_deg'))
+        ))
+        self.lidar_side_gate_min_points = max(
+            1, int(self._value('lidar_side_gate_min_points'))
+        )
+        self.lidar_side_gate_confirm_frames = max(
+            1, int(self._value('lidar_side_gate_confirm_frames'))
+        )
+        self.lidar_side_far_distance = max(
+            0.1, float(self._value('lidar_side_far_distance_m'))
+        )
+        self.lidar_side_far_half_width = math.radians(max(
+            1.0, float(self._value('lidar_side_far_half_width_deg'))
+        ))
+        self.lidar_side_far_confirm_frames = max(
+            1, int(self._value('lidar_side_far_confirm_frames'))
+        )
+        self.lidar_side_far_stop = max(
+            0.0, float(self._value('lidar_side_far_stop_sec'))
+        )
+        self.exit_forward_duration = max(
+            0.0, float(self._value('exit_forward_duration_sec'))
+        )
+        self.exit_right_turn_duration = max(
+            0.0, float(self._value('exit_right_turn_duration_sec'))
+        )
+        self.exit_right_steer = abs(
+            int(self._value('exit_right_steer_deg'))
+        )
+        self.exit_speed = abs(int(self._value('exit_speed')))
         self.reverse_steer_multiplier = max(
             0.0, float(self._value('reverse_steer_multiplier'))
         )
@@ -288,6 +337,13 @@ class ParkingNodeYym(Node):
         self.state = ParkingState.WAIT_FOR_SCAN
         self.state_started_at = now
         self.last_scan_at: Optional[float] = None
+        self.lidar_side_left_m: Optional[float] = None
+        self.lidar_side_right_m: Optional[float] = None
+        self.lidar_raw_left_m: Optional[float] = None
+        self.lidar_raw_right_m: Optional[float] = None
+        self.lidar_side_far_frames = 0
+        self.lidar_side_gate_frames = 0
+        self.lidar_side_gate_seen = False
         self.last_pair_at: Optional[float] = None
         self.last_command = (0, 0)
         self.failure_reason = ''
@@ -325,8 +381,10 @@ class ParkingNodeYym(Node):
         self.get_logger().info(
             'parking_node_yym: straight approach -> first-car trigger -> '
             f'{self.left_turn_duration_sec:.2f}s max-left timed turn '
-            '-> centered reverse between two right-slot vehicles; '
-            f'reverse_steer_multiplier={self.reverse_steer_multiplier:.2f}x, '
+            '-> repeated 1s LiDAR reverse corrections '
+            '-> +/-90deg side gate armed -> both sides far stop; '
+            f'far stop={self.lidar_side_far_distance:.2f}m/'
+            f'{self.lidar_side_far_confirm_frames} frames, '
             f'start_mode={self.start_mode.value}, '
             f'recognition_only={self.recognition_only}'
         )
@@ -350,6 +408,31 @@ class ParkingNodeYym(Node):
             return
 
         self.invalid_scan_count = 0
+        (
+            self.lidar_raw_left_m,
+            self.lidar_raw_right_m,
+        ) = self.lidar_raw_side_distances(msg)
+        if (
+            self.state == ParkingState.REVERSE_CENTER
+            and self.lidar_side_gate_seen
+            and self.reverse_phase in (
+                'STEER_SETTLE',
+                'DRIVE',
+                'MEASURE_STOP',
+            )
+        ):
+            if (
+                self.lidar_raw_left_m is not None
+                and self.lidar_raw_right_m is not None
+                and self.lidar_raw_left_m >= self.lidar_side_far_distance
+                and self.lidar_raw_right_m >= self.lidar_side_far_distance
+            ):
+                self.lidar_side_far_frames += 1
+            else:
+                self.lidar_side_far_frames = 0
+        else:
+            self.lidar_side_far_frames = 0
+
         if self.state == ParkingState.REVERSE_CENTER:
             tracked_pair = self.track_parking_pair(observation.vehicles)
             if tracked_pair is None:
@@ -362,9 +445,29 @@ class ParkingNodeYym(Node):
         if observation.pair is not None:
             self.last_pair_at = now
         if self.state == ParkingState.REVERSE_CENTER:
-            self.update_rear_half_stop_observation(observation)
-            self.update_straight_reverse_condition(observation.vehicles)
-
+            side_distances = self.lidar_side_vehicle_distances(
+                observation.vehicles
+            )
+            if side_distances is None:
+                self.lidar_side_left_m = None
+                self.lidar_side_right_m = None
+                if self.reverse_phase in (
+                    'STEER_SETTLE',
+                    'DRIVE',
+                    'MEASURE_STOP',
+                ):
+                    self.lidar_side_gate_frames = 0
+            else:
+                (
+                    self.lidar_side_left_m,
+                    self.lidar_side_right_m,
+                ) = side_distances
+                if self.reverse_phase in (
+                    'STEER_SETTLE',
+                    'DRIVE',
+                    'MEASURE_STOP',
+                ):
+                    self.lidar_side_gate_frames += 1
         if self.state == ParkingState.APPROACH_FIRST_CAR:
             self.first_car_frames = (
                 self.first_car_frames + 1
@@ -379,6 +482,90 @@ class ParkingNodeYym(Node):
             )
         else:
             self.gap_frames = 0
+
+    def lidar_side_vehicle_distances(
+        self, vehicles: list[VehicleCluster]
+    ) -> Optional[tuple[float, float]]:
+        """Return -90/+90 distances from two distinct vehicle clusters."""
+        left_candidates: list[tuple[int, float]] = []
+        right_candidates: list[tuple[int, float]] = []
+        half_width = self.lidar_side_gate_half_width
+
+        for index, vehicle in enumerate(vehicles):
+            if len(vehicle.points) == 0:
+                continue
+            scan_angles = np.arctan2(
+                -vehicle.points[:, 1],
+                -vehicle.points[:, 0],
+            )
+            left_count = int(np.count_nonzero(
+                np.abs(scan_angles + math.pi / 2.0) <= half_width
+            ))
+            right_count = int(np.count_nonzero(
+                np.abs(scan_angles - math.pi / 2.0) <= half_width
+            ))
+            if left_count >= self.lidar_side_gate_min_points:
+                left_mask = (
+                    np.abs(scan_angles + math.pi / 2.0) <= half_width
+                )
+                left_candidates.append((
+                    index,
+                    float(np.median(np.linalg.norm(
+                        vehicle.points[left_mask], axis=1
+                    ))),
+                ))
+            if right_count >= self.lidar_side_gate_min_points:
+                right_mask = (
+                    np.abs(scan_angles - math.pi / 2.0) <= half_width
+                )
+                right_candidates.append((
+                    index,
+                    float(np.median(np.linalg.norm(
+                        vehicle.points[right_mask], axis=1
+                    ))),
+                ))
+
+        distinct_pairs = [
+            (left_distance + right_distance, left_distance, right_distance)
+            for left_index, left_distance in left_candidates
+            for right_index, right_distance in right_candidates
+            if left_index != right_index
+        ]
+        if not distinct_pairs:
+            return None
+        _, left_distance, right_distance = min(distinct_pairs)
+        return left_distance, right_distance
+
+    def lidar_raw_side_distances(
+        self, msg: LaserScan
+    ) -> tuple[Optional[float], Optional[float]]:
+        """Return raw median ranges near scan -90 and +90 degrees."""
+        left_ranges: list[float] = []
+        right_ranges: list[float] = []
+        for index, raw_distance in enumerate(msg.ranges):
+            distance = float(raw_distance)
+            if (
+                not math.isfinite(distance)
+                or distance < msg.range_min
+                or distance > msg.range_max
+            ):
+                continue
+            angle = msg.angle_min + index * msg.angle_increment
+            angle = math.atan2(math.sin(angle), math.cos(angle))
+            if (
+                abs(angle + math.pi / 2.0)
+                <= self.lidar_side_far_half_width
+            ):
+                left_ranges.append(distance)
+            if (
+                abs(angle - math.pi / 2.0)
+                <= self.lidar_side_far_half_width
+            ):
+                right_ranges.append(distance)
+        return (
+            float(np.median(left_ranges)) if left_ranges else None,
+            float(np.median(right_ranges)) if right_ranges else None,
+        )
 
     def held_steering_command(self) -> int:
         """Reuse the last steering target already sent through /motor_control."""
@@ -712,6 +899,13 @@ class ParkingNodeYym(Node):
             self.straight_reverse_latched = False
             self.straight_reverse_started = False
             self.straight_reverse_trigger_distance = math.inf
+            self.lidar_side_gate_frames = 0
+            self.lidar_side_left_m = None
+            self.lidar_side_right_m = None
+            self.lidar_raw_left_m = None
+            self.lidar_raw_right_m = None
+            self.lidar_side_far_frames = 0
+            self.lidar_side_gate_seen = False
             self.reverse_phase = 'STEER_SETTLE'
             self.reverse_phase_started_at = now
             self.reverse_segment_started_at = None
@@ -723,10 +917,10 @@ class ParkingNodeYym(Node):
                 else 0
             )
             self.get_logger().info(
-                f'Reverse segment 1 target: steer='
-                f'{self.reverse_segment_steer}deg; '
-                f'settling before '
-                f'{self.reverse_segment_drive_duration:.1f}s drive'
+                f'LiDAR reverse segment 1: steer='
+                f'{self.reverse_segment_steer}deg for '
+                f'{self.reverse_segment_drive_duration:.1f}s; '
+                'waiting for vehicles at both +/-90deg side gates'
             )
 
     def enter_parking_mode(self, now: float) -> None:
@@ -739,9 +933,14 @@ class ParkingNodeYym(Node):
 
     def control_tick(self) -> None:
         now = time.monotonic()
-        if self.state == ParkingState.PARKED:
-            # PARKED is a final latch at zero steering and zero speed.
-            self.reverse_phase = 'PARKED_HOLD'
+        if self.state in (
+            ParkingState.PARKED,
+            ParkingState.PARKING_FAILED,
+            ParkingState.EMERGENCY_STOP,
+        ):
+            # Terminal states are latched. Avoid repeatedly logging the same
+            # LiDAR timeout/failure at the 20 Hz control rate.
+            self.reverse_phase = f'{self.state.value}_HOLD'
             self.publish_control(0, 0)
             return
         if self.last_scan_at is None:
@@ -782,10 +981,8 @@ class ParkingNodeYym(Node):
                 self.transition(ParkingState.SET_LEFT_STEER, now)
                 self.publish_control(self.left_max_steer, 0)
                 return
-            self.publish_control(
-                self.held_steering_command(),
-                self.approach_speed,
-            )
+            # Approach always requests an explicit straight wheel angle.
+            self.publish_control(0, self.approach_speed)
             return
 
         if self.state == ParkingState.SET_LEFT_STEER:
@@ -852,10 +1049,18 @@ class ParkingNodeYym(Node):
                 self.reverse_timeout > 0.0
                 and elapsed >= self.reverse_timeout
             ):
-                self.fail('segmented reverse timeout', now)
+                self.fail('LiDAR reverse/exit timeout', now)
                 return
+
+            lidar_reverse_phases = (
+                'STEER_SETTLE',
+                'DRIVE',
+                'MEASURE_STOP',
+            )
             if (
-                self.observation.rear_min_distance is not None
+                self.reverse_phase
+                in lidar_reverse_phases + ('LIDAR_SIDE_REVERSE',)
+                and self.observation.rear_min_distance is not None
                 and self.observation.rear_min_distance
                 <= self.rear_hard_stop_distance
             ):
@@ -863,105 +1068,88 @@ class ParkingNodeYym(Node):
                 return
 
             if (
-                self.straight_reverse_latched
-                and not self.straight_reverse_started
+                self.reverse_phase in lidar_reverse_phases
+                and self.lidar_side_gate_seen
+                and self.lidar_side_far_frames
+                >= self.lidar_side_far_confirm_frames
             ):
-                # The trigger owns steering from this point onward. Send one
-                # stable target only; no pair/single-vehicle corrections run.
-                self.reverse_phase = 'STRAIGHT_CENTER'
+                self.reverse_phase = 'SIDE_FAR_STOP'
+                self.reverse_phase_started_at = now
                 self.publish_control(0, 0)
-                if (
-                    self.reverse_phase_started_at is not None
-                    and now - self.reverse_phase_started_at
-                    >= self.straight_reverse_stop
-                ):
-                    self.straight_reverse_started = True
-                    self.reverse_phase = 'STRAIGHT_DRIVE'
-                    self.reverse_phase_started_at = now
-                    self.rear_half_points_seen = (
-                        self.rear_half_lidar_point_count > 0
-                    )
-                    self.rear_half_empty_frames = 0
-                return
-
-            if self.rear_half_empty_frames > 0:
-                # Stop on the very first empty scan. Only latch PARKED after
-                # several consecutive empty scans while already stationary.
-                self.publish_control(0, 0)
-                if self.reverse_phase != 'MEASURE_STOP':
-                    self.reverse_phase = 'MEASURE_STOP'
-                    self.reverse_phase_started_at = now
-                if (
-                    self.rear_half_empty_frames
-                    >= self.rear_half_empty_confirm_frames
-                ):
-                    self.transition(ParkingState.PARKED, now)
-                    self.publish_control(0, 0)
-                    self.get_logger().info(
-                        'Parking complete: no valid LiDAR points remain '
-                        'below the LiDAR x=0 line'
-                    )
-                return
-
-            if self.straight_reverse_latched:
-                self.reverse_phase = 'STRAIGHT_DRIVE'
-                self.publish_control(0, self.reverse_speed)
-                return
-
-            pair = self.observation.pair
-            single_vehicle = (
-                self.observation.vehicles[0]
-                if pair is None and len(self.observation.vehicles) == 1
-                else None
-            )
-            if pair is None and single_vehicle is None:
-                # No usable vehicle geometry is available. Wait stopped for
-                # either a two-vehicle pair or one vehicle line to reappear.
-                if self.reverse_phase != 'MEASURE_STOP':
-                    self.reverse_phase = 'MEASURE_STOP'
-                    self.reverse_phase_started_at = now
-                self.publish_control(self.held_steering_command(), 0)
-                return
-
-            if self.reverse_phase == 'STEER_SETTLE':
-                self.publish_control(self.reverse_segment_steer, 0)
-                if (
-                    self.reverse_phase_started_at is not None
-                    and now - self.reverse_phase_started_at
-                    >= self.steer_settle_sec
-                ):
-                    self.reverse_segment_drive_duration = (
-                        self.reverse_segment_duration
-                    )
-                    self.reverse_phase = 'DRIVE'
-                    self.reverse_segment_started_at = now
-                    self.get_logger().info(
-                        f'Reverse segment {self.reverse_segment_index} '
-                        f'driving with steer='
-                        f'{self.reverse_segment_steer}deg for '
-                        f'{self.reverse_segment_drive_duration:.1f}s'
-                    )
-                return
-
-            if self.reverse_phase == 'DRIVE':
-                if (
-                    self.reverse_segment_started_at is not None
-                    and now - self.reverse_segment_started_at
-                    >= self.reverse_segment_drive_duration
-                ):
-                    self.reverse_phase = 'MEASURE_STOP'
-                    self.reverse_phase_started_at = now
-                    self.publish_control(
-                        self.held_steering_command(), 0
-                    )
-                    return
-                self.publish_control(
-                    self.reverse_segment_steer,
-                    self.reverse_speed,
+                self.get_logger().info(
+                    'Both raw LiDAR -90/+90 ranges are far '
+                    f'(>={self.lidar_side_far_distance:.2f}m for '
+                    f'{self.lidar_side_far_frames} frames); '
+                    f'stopping for {self.lidar_side_far_stop:.1f}s'
                 )
                 return
 
-            if self.reverse_phase == 'MEASURE_STOP':
+            if (
+                self.reverse_phase in lidar_reverse_phases
+                and not self.lidar_side_gate_seen
+                and self.lidar_side_gate_frames
+                >= self.lidar_side_gate_confirm_frames
+            ):
+                self.lidar_side_gate_seen = True
+                self.lidar_side_far_frames = 0
+                self.get_logger().info(
+                    'Distinct parked vehicles confirmed at LiDAR '
+                    '-90/+90deg gates; completion check armed while '
+                    'continuing one-second reverse corrections'
+                )
+
+            if self.reverse_phase in lidar_reverse_phases:
+                pair = self.observation.pair
+                single_vehicle = (
+                    self.observation.vehicles[0]
+                    if pair is None
+                    and len(self.observation.vehicles) == 1
+                    else None
+                )
+                if pair is None and single_vehicle is None:
+                    self.reverse_phase = 'MEASURE_STOP'
+                    self.reverse_phase_started_at = now
+                    self.publish_control(self.held_steering_command(), 0)
+                    return
+
+                if self.reverse_phase == 'STEER_SETTLE':
+                    self.publish_control(self.reverse_segment_steer, 0)
+                    if (
+                        self.reverse_phase_started_at is not None
+                        and now - self.reverse_phase_started_at
+                        >= self.steer_settle_sec
+                    ):
+                        self.reverse_segment_drive_duration = (
+                            self.reverse_segment_duration
+                        )
+                        self.reverse_phase = 'DRIVE'
+                        self.reverse_segment_started_at = now
+                        self.get_logger().info(
+                            f'LiDAR reverse segment '
+                            f'{self.reverse_segment_index}: '
+                            f'steer={self.reverse_segment_steer}deg for '
+                            f'{self.reverse_segment_drive_duration:.1f}s'
+                        )
+                    return
+
+                if self.reverse_phase == 'DRIVE':
+                    if (
+                        self.reverse_segment_started_at is not None
+                        and now - self.reverse_segment_started_at
+                        >= self.reverse_segment_drive_duration
+                    ):
+                        self.reverse_phase = 'MEASURE_STOP'
+                        self.reverse_phase_started_at = now
+                        self.publish_control(
+                            self.held_steering_command(), 0
+                        )
+                        return
+                    self.publish_control(
+                        self.reverse_segment_steer,
+                        self.reverse_speed,
+                    )
+                    return
+
                 self.publish_control(self.held_steering_command(), 0)
                 if (
                     self.reverse_phase_started_at is None
@@ -970,12 +1158,9 @@ class ParkingNodeYym(Node):
                 ):
                     return
 
-                self.reverse_segment_started_at = now
                 self.reverse_segment_index += 1
                 if pair is not None:
-                    self.reverse_segment_steer = (
-                        self.reverse_steering(pair)
-                    )
+                    self.reverse_segment_steer = self.reverse_steering(pair)
                     target_description = (
                         f'reference=({pair.reference_point[0]:+.2f},'
                         f'{pair.reference_point[1]:+.2f})m'
@@ -991,15 +1176,66 @@ class ParkingNodeYym(Node):
                 self.reverse_phase = 'STEER_SETTLE'
                 self.reverse_phase_started_at = now
                 self.get_logger().info(
-                    f'Reverse segment {self.reverse_segment_index} target: '
+                    f'LiDAR reverse segment '
+                    f'{self.reverse_segment_index}: '
                     f'{target_description}, '
                     f'steer={self.reverse_segment_steer}deg'
                 )
                 return
 
+            phase_elapsed = (
+                0.0
+                if self.reverse_phase_started_at is None
+                else now - self.reverse_phase_started_at
+            )
+            if self.reverse_phase == 'SIDE_FAR_STOP':
+                self.publish_control(0, 0)
+                if phase_elapsed >= self.lidar_side_far_stop:
+                    self.reverse_phase = 'EXIT_FORWARD'
+                    self.reverse_phase_started_at = now
+                    self.get_logger().info(
+                        f'Exit: straight forward for '
+                        f'{self.exit_forward_duration:.1f}s'
+                    )
+                return
+
+            if self.reverse_phase == 'EXIT_FORWARD':
+                if phase_elapsed >= self.exit_forward_duration:
+                    self.reverse_phase = 'EXIT_RIGHT_TURN'
+                    self.reverse_phase_started_at = now
+                    self.publish_control(
+                        self.exit_right_steer, self.exit_speed
+                    )
+                    self.get_logger().info(
+                        f'Exit: +{self.exit_right_steer}deg right turn for '
+                        f'{self.exit_right_turn_duration:.1f}s'
+                    )
+                    return
+                self.publish_control(0, self.exit_speed)
+                return
+
+            if self.reverse_phase == 'EXIT_RIGHT_TURN':
+                if phase_elapsed >= self.exit_right_turn_duration:
+                    self.reverse_phase = 'EXIT_STRAIGHT'
+                    self.reverse_phase_started_at = now
+                    self.get_logger().info(
+                        'Exit right turn complete; driving straight'
+                    )
+                self.publish_control(
+                    0 if self.reverse_phase == 'EXIT_STRAIGHT'
+                    else self.exit_right_steer,
+                    self.exit_speed,
+                )
+                return
+
+            if self.reverse_phase == 'EXIT_STRAIGHT':
+                self.publish_control(0, self.exit_speed)
+                return
+
             self.reverse_phase = 'MEASURE_STOP'
             self.reverse_phase_started_at = now
-            self.publish_control(self.held_steering_command(), 0)
+            self.lidar_side_far_frames = 0
+            self.publish_control(0, 0)
             return
 
         if self.state == ParkingState.PARKED:
@@ -1093,17 +1329,6 @@ class ParkingNodeYym(Node):
         for radius_m in np.arange(0.5, self.debug_max_range + 0.01, 0.5):
             radius = int(radius_m * scale)
             cv2.circle(image, (center, center), radius, (0, 60, 0), 1)
-        straight_gate_radius = int(self.straight_reverse_radius * scale)
-        straight_gate_color = (
-            (0, 220, 0) if self.straight_reverse_latched else (0, 100, 0)
-        )
-        cv2.circle(
-            image,
-            (center, center),
-            straight_gate_radius,
-            straight_gate_color,
-            2,
-        )
         cv2.line(image, (center, 20), (center, size - 20), (0, 70, 0), 1)
         cv2.line(image, (20, center), (size - 20, center), (0, 70, 0), 1)
 
@@ -1230,22 +1455,72 @@ class ParkingNodeYym(Node):
                 cv2.LINE_AA,
             )
         elif self.state == ParkingState.REVERSE_CENTER:
-            radius_text = (
-                f'{self.straight_reverse_trigger_distance:.2f}m'
-                if math.isfinite(self.straight_reverse_trigger_distance)
-                else '--'
-            )
-            straight_state = (
-                'LOCKED'
-                if self.straight_reverse_latched
-                else 'WAIT'
-            )
+            if self.reverse_phase in (
+                'STEER_SETTLE',
+                'DRIVE',
+                'MEASURE_STOP',
+            ):
+                lidar_raw_left_text = (
+                    f'{self.lidar_raw_left_m:.2f}'
+                    if self.lidar_raw_left_m is not None
+                    else '--'
+                )
+                lidar_raw_right_text = (
+                    f'{self.lidar_raw_right_m:.2f}'
+                    if self.lidar_raw_right_m is not None
+                    else '--'
+                )
+                guidance_text = (
+                    f'LiDAR +/-90 gate='
+                    f'{self.lidar_side_gate_frames}/'
+                    f'{self.lidar_side_gate_confirm_frames} '
+                    f'armed={int(self.lidar_side_gate_seen)} '
+                    f'raw={lidar_raw_left_text}/{lidar_raw_right_text}m '
+                    f'far={self.lidar_side_far_frames}/'
+                    f'{self.lidar_side_far_confirm_frames} '
+                    f'window=+/-'
+                    f'{math.degrees(self.lidar_side_gate_half_width):.0f}deg'
+                )
+            else:
+                lidar_left_text = (
+                    f'{self.lidar_side_left_m:.2f}'
+                    if self.lidar_side_left_m is not None
+                    else '--'
+                )
+                lidar_right_text = (
+                    f'{self.lidar_side_right_m:.2f}'
+                    if self.lidar_side_right_m is not None
+                    else '--'
+                )
+                lidar_difference_text = (
+                    f'{abs(self.lidar_side_left_m - self.lidar_side_right_m):.2f}'
+                    if (
+                        self.lidar_side_left_m is not None
+                        and self.lidar_side_right_m is not None
+                    )
+                    else '--'
+                )
+                lidar_raw_left_text = (
+                    f'{self.lidar_raw_left_m:.2f}'
+                    if self.lidar_raw_left_m is not None
+                    else '--'
+                )
+                lidar_raw_right_text = (
+                    f'{self.lidar_raw_right_m:.2f}'
+                    if self.lidar_raw_right_m is not None
+                    else '--'
+                )
+                guidance_text = (
+                    f'LiDAR -90/+90={lidar_left_text}/'
+                    f'{lidar_right_text}m '
+                    f'diff={lidar_difference_text}m '
+                    f'raw={lidar_raw_left_text}/{lidar_raw_right_text}m '
+                    f'far={self.lidar_side_far_frames}/'
+                    f'{self.lidar_side_far_confirm_frames}'
+                )
             cv2.putText(
                 image,
-                f'straight={straight_state} nearest={radius_text} '
-                f'gate={self.straight_reverse_radius:.2f}m '
-                f'step={self.reverse_segment_drive_duration:.1f}s '
-                f'gain={self.reverse_steer_multiplier:.2f}x',
+                guidance_text,
                 (18, 121),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.43,
