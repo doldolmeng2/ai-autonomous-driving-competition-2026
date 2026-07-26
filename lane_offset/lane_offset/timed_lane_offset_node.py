@@ -5,7 +5,8 @@
     x좌표(target_right_x)에 오도록 /lane_offset 을 발행한다.
 
 설계 요점(기존 노드와 다른 점):
-    1) 기준은 중앙 점선이 아니라 **오른쪽 실선**이다.
+    1) 기본 기준은 **오른쪽 실선**이다. 초록 매트가 보이지 않아 오른쪽 실선
+       검증에 실패하면, 중앙 점선을 대체 기준으로 사용한다.
     2) 조향에 쓰는 x는 실선 전체가 아니라 **차량과 y축으로 가장 가까운 부분**만
        사용한다. 실선은 커브에서 휘기 때문에, 전체 평균을 기준 x에 맞추려 하면
        먼 쪽 곡률에 끌려가 오히려 차선을 이탈할 수 있다. 그래서 화면 아래쪽
@@ -121,6 +122,29 @@ MIN_LINE_ASPECT_RATIO = 0.0   # 세로/가로 비. 동글동글한 꽃 그림 �
 # 기존 카메라 좌표 보정값을 유지한 값이므로, BEV 적용 후에는 디버그 화면의
 # right_x를 보고 다시 조정해야 한다.
 TARGET_RIGHT_X = 510
+# 초록 매트 검증을 통과한 오른쪽 실선이 이 프레임 수만큼 연속으로 보일 때만
+# 중앙선 fallback에서 오른쪽 실선 제어로 복귀한다.
+RIGHT_GREEN_STABLE_FRAMES = 10
+# 오른쪽 실선이 안 보일 때 중앙 점선이 있어야 할 BEV 화면 x. 기본값은
+# TARGET_RIGHT_X - 차선 폭(약 190px)이며, 실제 BEV 디버그 화면에서 조정한다.
+TARGET_CENTER_X = 108
+# 중앙 점선 후보는 이 범위 안에서만 고른다. 초록 검증이 사라진 오른쪽 실선을
+# 중앙선으로 오인하지 않도록 탐색 폭을 제한한다.
+CENTER_SEARCH_HALF_WIDTH_PX = 150
+# 중앙선 fallback에서 한 프레임에 이보다 크게 x가 바뀌면 다른 흰색 물체를
+# 중앙선으로 오인한 것으로 보고 해당 측정을 버린다.
+CENTER_MAX_X_JUMP_PX = 35
+# 중앙선 위치는 정상 범위 안에서도 점선 조각 선택에 따라 조금씩 흔들릴 수 있다.
+# 중앙선 fallback일 때만 offset을 한 프레임에 이 값 이상 바꾸지 않는다.
+CENTER_MAX_OFFSET_STEP = 8
+# 중앙 점선 폴백 추적 설정. 점선 조각 사이의 공백을 건너며 아래/위 조각을 모두
+# 같은 트랙으로 묶기 위한 슬라이딩 윈도우 값이다.
+CENTER_NUM_WINDOWS = 15
+CENTER_WINDOW_MARGIN_PX = 160
+CENTER_WINDOW_MIN_COMPONENT_PIXELS = 30
+CENTER_RECONNECT_HEIGHT_PX = 15
+CENTER_MAX_TRACKED_PIECES = 4
+CENTER_MAX_VERTICAL_OVERLAP_RATIO = 0.20
 # 조향에 쓰는 x는 BEV 바닥에서 이 픽셀 수 이내(차량과 가장 가까운 구간)의
 # 실선 픽셀만 사용한다. 커브에서 먼 쪽 곡률에 끌려가지 않게 하는 핵심 값.
 NEAR_ROWS = 80
@@ -188,6 +212,33 @@ class TimedLaneOffsetNggNode(Node):
         self.declare_parameter('min_line_height_px', MIN_LINE_HEIGHT_PX)
         self.declare_parameter('min_line_aspect_ratio', MIN_LINE_ASPECT_RATIO)
         self.declare_parameter('target_right_x', TARGET_RIGHT_X)
+        self.declare_parameter(
+            'right_green_stable_frames', RIGHT_GREEN_STABLE_FRAMES
+        )
+        self.declare_parameter('target_center_x', TARGET_CENTER_X)
+        self.declare_parameter(
+            'center_search_half_width_px', CENTER_SEARCH_HALF_WIDTH_PX
+        )
+        self.declare_parameter('center_max_x_jump_px', CENTER_MAX_X_JUMP_PX)
+        self.declare_parameter('center_max_offset_step', CENTER_MAX_OFFSET_STEP)
+        self.declare_parameter('center_num_windows', CENTER_NUM_WINDOWS)
+        self.declare_parameter(
+            'center_window_margin_px', CENTER_WINDOW_MARGIN_PX
+        )
+        self.declare_parameter(
+            'center_window_min_component_pixels',
+            CENTER_WINDOW_MIN_COMPONENT_PIXELS,
+        )
+        self.declare_parameter(
+            'center_reconnect_height_px', CENTER_RECONNECT_HEIGHT_PX
+        )
+        self.declare_parameter(
+            'center_max_tracked_pieces', CENTER_MAX_TRACKED_PIECES
+        )
+        self.declare_parameter(
+            'center_max_vertical_overlap_ratio',
+            CENTER_MAX_VERTICAL_OVERLAP_RATIO,
+        )
         self.declare_parameter('near_rows', NEAR_ROWS)
         self.declare_parameter('near_min_pixels', NEAR_MIN_PIXELS)
         self.declare_parameter(
@@ -208,6 +259,11 @@ class TimedLaneOffsetNggNode(Node):
         # 런타임 상태
         self.last_offset = 0.0
         self.last_line_x = None          # 직전 프레임의 오른쪽 실선 측정 x
+        self.last_center_line_x = None   # 직전 프레임의 중앙 점선 측정 x
+        # 실제로 offset을 계산한 기준선. 오른쪽/중앙선의 추적 상태를 완전히
+        # 분리하고, 기준선 전환 순간에는 새 기준선을 첫 관측으로 취급한다.
+        self.active_control_line_kind = None
+        self.right_green_stable_count = 0
         self.publish_debug_image = True
 
         qos = QoSProfile(
@@ -222,7 +278,8 @@ class TimedLaneOffsetNggNode(Node):
 
         self.get_logger().info(
             f'Subscribing {self.image_topic}, publishing {self.lane_offset_topic}, '
-            f'target_right_x={self.target_right_x}, near_rows={self.near_rows}, '
+            f'target_right_x={self.target_right_x}, '
+            f'target_center_x={self.target_center_x}, near_rows={self.near_rows}, '
             f'bev_y=({self.bev_y_top_ratio},{self.bev_y_bottom_ratio}), '
             f'bev_bottom_width={self.bev_bottom_width_ratio}, '
             f'debug_view={self.debug_view}'
@@ -255,6 +312,35 @@ class TimedLaneOffsetNggNode(Node):
         self.min_line_height_px = int(get('min_line_height_px'))
         self.min_line_aspect_ratio = float(get('min_line_aspect_ratio'))
         self.target_right_x = int(get('target_right_x'))
+        self.right_green_stable_frames = max(
+            1, int(get('right_green_stable_frames'))
+        )
+        self.target_center_x = int(get('target_center_x'))
+        self.center_search_half_width_px = max(
+            1, int(get('center_search_half_width_px'))
+        )
+        self.center_max_x_jump_px = max(
+            1, int(get('center_max_x_jump_px'))
+        )
+        self.center_max_offset_step = max(
+            1, int(get('center_max_offset_step'))
+        )
+        self.center_num_windows = max(1, int(get('center_num_windows')))
+        self.center_window_margin_px = max(
+            1, int(get('center_window_margin_px'))
+        )
+        self.center_window_min_component_pixels = max(
+            1, int(get('center_window_min_component_pixels'))
+        )
+        self.center_reconnect_height_px = max(
+            1, int(get('center_reconnect_height_px'))
+        )
+        self.center_max_tracked_pieces = max(
+            1, int(get('center_max_tracked_pieces'))
+        )
+        self.center_max_vertical_overlap_ratio = float(np.clip(
+            get('center_max_vertical_overlap_ratio'), 0.0, 1.0
+        ))
         self.near_rows = max(1, int(get('near_rows')))
         self.near_min_pixels = int(get('near_min_pixels'))
         self.allow_line_bottom_fallback = bool(get('allow_line_bottom_fallback'))
@@ -296,23 +382,110 @@ class TimedLaneOffsetNggNode(Node):
         green_mask = self.make_green_mask(bev)
         self.show_mask_windows(white_mask, green_mask)
 
-        line_mask, measured_x, measure_mode, reject_reason = self.find_right_solid_line(
+        right_mask, right_x, right_mode, right_reason = self.find_right_solid_line(
             white_mask, green_mask
         )
+        if right_x is None:
+            self.right_green_stable_count = 0
+        else:
+            self.right_green_stable_count = min(
+                self.right_green_stable_count + 1,
+                self.right_green_stable_frames,
+            )
+
+        target_x = self.target_right_x
+        line_kind = 'RIGHT'
+        line_mask = right_mask
+        measured_x = right_x
+        measure_mode = right_mode
+        reject_reason = right_reason
+        center_jump_rejected = False
+
+        if self.right_green_stable_count < self.right_green_stable_frames:
+            # 오른쪽 실선은 초록 매트가 연속 프레임에서 확인될 때만 제어권을
+            # 받는다. 그 전에는 중앙 점선을 계속 사용해 짧은 초록 오검출에
+            # 조향 기준이 바뀌지 않게 한다.
+            if self.active_control_line_kind != 'CENTER':
+                # 오른쪽 실선 주행 중 남아 있던 중앙선 좌표는 다음 중앙선 주행의
+                # 기준으로 쓰면 안 된다. 전환 프레임은 새 중앙선 트랙의 시작이다.
+                self.last_center_line_x = None
+            target_x = self.target_center_x
+            line_kind = 'CENTER'
+            measured_x = None
+            measure_mode = 'none'
+            center_mask, center_x, center_mode, center_reason = self.find_center_line(
+                white_mask
+            )
+            # 새 중앙선 후보가 점프 판정으로 버려져도, 디버그 화면에서는 왜
+            # 버렸는지 확인할 수 있도록 후보 마스크는 표시한다.
+            if center_mask is not None:
+                line_mask = center_mask
+            if (
+                center_x is not None
+                and self.last_center_line_x is not None
+                and abs(center_x - self.last_center_line_x)
+                > self.center_max_x_jump_px
+            ):
+                center_jump_rejected = True
+                center_reason = (
+                    f'center x jump {self.last_center_line_x:.1f} -> '
+                    f'{center_x:.1f} exceeds {self.center_max_x_jump_px}px'
+                )
+                center_x = None
+            if center_x is not None:
+                line_mask = center_mask
+                measured_x = center_x
+                measure_mode = center_mode
+                target_x = self.target_center_x
+                line_kind = 'CENTER'
+                if right_x is not None:
+                    reject_reason = (
+                        f'right green stabilizing '
+                        f'({self.right_green_stable_count}/'
+                        f'{self.right_green_stable_frames})'
+                    )
+                self.get_logger().warn(
+                    f'Using center line fallback ({reject_reason})',
+                    throttle_duration_sec=1.0,
+                )
+            else:
+                reject_reason = f'{reject_reason}; center fallback: {center_reason}'
 
         if measured_x is None:
-            # 오른쪽 실선을 못 찾음 -> 직전 offset 유지(급변 방지)
+            # 중앙선도 잠깐 끊기거나, 오른쪽 실선의 10프레임 안정화가 아직 끝나지
+            # 않았으면 새 offset을 만들지 않고 직전 값을 그대로 유지한다.
             self.get_logger().warn(
-                f'Right solid line not found ({reject_reason}); holding last offset',
+                f'No active lane line ({reject_reason}); holding last offset',
                 throttle_duration_sec=1.0,
             )
             self.publish_offset(self.last_offset)
             self.publish_debug(
-                msg, bev, 'NO RIGHT LINE', line_mask, None, measure_mode,
+                msg, bev,
+                'CENTER JUMP HOLD' if center_jump_rejected else 'CENTER LOST HOLD',
+                line_mask, None, measure_mode,
+                target_x=target_x, line_kind=line_kind,
+                held_x=(
+                    self.last_center_line_x if line_kind == 'CENTER' else None
+                ),
             )
             return
 
-        raw_offset = self.map_line_x_to_offset(measured_x)
+        raw_offset = self.map_line_x_to_offset(measured_x, target_x)
+        center_step_limited = False
+        if line_kind == 'CENTER':
+            limited_offset = float(np.clip(
+                raw_offset,
+                self.last_offset - self.center_max_offset_step,
+                self.last_offset + self.center_max_offset_step,
+            ))
+            if limited_offset != raw_offset:
+                center_step_limited = True
+                self.get_logger().warn(
+                    f'Center offset step limited: {self.last_offset:.0f} -> '
+                    f'{raw_offset} (using {limited_offset:.0f})',
+                    throttle_duration_sec=1.0,
+                )
+                raw_offset = int(round(limited_offset))
 
         if abs(raw_offset - self.last_offset) > self.max_offset_jump:
             self.get_logger().warn(
@@ -323,7 +496,7 @@ class TimedLaneOffsetNggNode(Node):
             self.publish_offset(self.last_offset)
             self.publish_debug(
                 msg, bev, 'JUMP REJECTED', line_mask, measured_x, measure_mode,
-                raw_offset,
+                raw_offset, target_x, line_kind,
             )
             return
 
@@ -331,10 +504,23 @@ class TimedLaneOffsetNggNode(Node):
             self.offset_smoothing_alpha * raw_offset
             + (1.0 - self.offset_smoothing_alpha) * self.last_offset
         )
-        self.last_line_x = measured_x
+        if line_kind == 'RIGHT':
+            self.last_line_x = measured_x
+            # 다음에 중앙선 fallback으로 들어가면, 과거 중앙선이 아닌 새 관측부터
+            # 중앙선 점프 제한을 시작한다.
+            self.last_center_line_x = None
+        else:
+            self.last_center_line_x = measured_x
+        self.active_control_line_kind = line_kind
         self.publish_offset(self.last_offset)
         self.publish_debug(
-            msg, bev, 'OK', line_mask, measured_x, measure_mode, raw_offset,
+            msg, bev,
+            (
+                'OK' if line_kind == 'RIGHT'
+                else 'CENTER STEP LIMITED' if center_step_limited
+                else 'CENTER FALLBACK'
+            ),
+            line_mask, measured_x, measure_mode, raw_offset, target_x, line_kind,
         )
 
     # ======================================================================
@@ -533,15 +719,159 @@ class TimedLaneOffsetNggNode(Node):
                 return float(np.median(xs[bottom])), 'line bottom'
         return None, 'none'
 
+    def find_center_line(self, white_mask):
+        """중앙 점선 조각들을 하나의 트랙으로 묶어 하단 x를 추정한다.
+
+        점선은 위/아래 조각이 연결요소로 분리된다. 한 조각만 고르면 그 조각이
+        사라지는 프레임에 fallback이 끊기므로, 기준 x 근처의 세로로 분리된 조각을
+        모두 모은 뒤 슬라이딩 윈도우로 빈 구간을 건너며 직선 피팅한다.
+        """
+        reference_x = (
+            self.last_center_line_x
+            if self.last_center_line_x is not None
+            else self.target_center_x
+        )
+        center_mask, piece_count, reason = self.collect_center_dashed_pieces(
+            white_mask, reference_x
+        )
+        if center_mask is None:
+            return None, None, 'none', reason
+
+        measured_x, observation_count = self.track_center_dashed_line(
+            center_mask, reference_x
+        )
+        if measured_x is None:
+            return center_mask, None, 'none', 'center sliding-window track failed'
+        return (
+            center_mask,
+            measured_x,
+            f'center track ({piece_count} pieces/{observation_count} points)',
+            '',
+        )
+
+    def collect_center_dashed_pieces(self, white_mask, reference_x):
+        """중앙선 후보 중 위아래로 분리된 점선 조각을 함께 고른다."""
+        reconnect_kernel = np.ones(
+            (self.center_reconnect_height_px, 1), dtype=np.uint8
+        )
+        candidates_mask = cv2.morphologyEx(
+            white_mask, cv2.MORPH_CLOSE, reconnect_kernel
+        )
+        height, _width = white_mask.shape
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+            candidates_mask, connectivity=8
+        )
+        candidates = []
+        for label in range(1, num_labels):
+            x, y, w, h, area = stats[label]
+            if area < self.min_component_area or h < self.min_line_height_px:
+                continue
+            if w > 0 and (h / float(w)) < self.min_line_aspect_ratio:
+                continue
+
+            local_y, local_x = np.where(labels == label)
+            if len(np.unique(local_y)) >= 3:
+                slope, intercept = np.polyfit(local_y, local_x, 1)
+                bottom_x = float(slope * (height - 1) + intercept)
+            else:
+                bottom_x = float(centroids[label][0])
+            bbox_distance = max(
+                float(x) - float(reference_x),
+                float(reference_x) - float(x + w - 1),
+                0.0,
+            )
+            distance = abs(bottom_x - float(reference_x))
+            if min(distance, bbox_distance) <= self.center_search_half_width_px:
+                candidates.append((distance, label, x, y, w, h))
+
+        if not candidates:
+            return None, 0, 'no center dash component in search window'
+
+        # 기준선에 가장 가까운 조각을 시작점으로 정하고, y 구간이 겹치지 않는
+        # 위/아래 조각을 같은 점선 트랙으로 추가한다.
+        selected = [min(candidates, key=lambda candidate: candidate[0])]
+        for candidate in sorted(candidates, key=lambda item: item[0]):
+            if candidate[1] == selected[0][1]:
+                continue
+            _distance, _label, _x, y, _w, h = candidate
+            separate = True
+            for chosen in selected:
+                chosen_y, chosen_h = chosen[3], chosen[5]
+                overlap = max(
+                    0, min(y + h, chosen_y + chosen_h) - max(y, chosen_y)
+                )
+                if overlap / float(min(h, chosen_h)) > self.center_max_vertical_overlap_ratio:
+                    separate = False
+                    break
+            if separate:
+                selected.append(candidate)
+            if len(selected) >= self.center_max_tracked_pieces:
+                break
+
+        filtered = np.zeros_like(white_mask)
+        for _distance, label, _x, _y, _w, _h in selected:
+            # 닫힘(morphological close)으로 후보를 연결했더라도, offset에는 실제
+            # 흰색 점선 픽셀만 사용한다. 점선 사이의 가상 연결선에 끌리지 않는다.
+            filtered[(labels == label) & (white_mask > 0)] = 255
+        return filtered, len(selected), ''
+
+    def track_center_dashed_line(self, center_mask, base_x):
+        """점선 공백을 유지하며 모든 관측 조각으로 하단 x를 피팅한다."""
+        height, width = center_mask.shape
+        window_height = max(1, height // self.center_num_windows)
+        x_current = float(base_x)
+        collected_x, collected_y = [], []
+
+        for index in range(self.center_num_windows):
+            y_high = height - index * window_height
+            y_low = max(0, height - (index + 1) * window_height)
+            x_low = max(0, int(round(x_current - self.center_window_margin_px)))
+            x_high = min(width, int(round(x_current + self.center_window_margin_px + 1)))
+            if x_high <= x_low or y_high <= y_low:
+                continue
+
+            sub_mask = center_mask[y_low:y_high, x_low:x_high]
+            num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+                sub_mask, connectivity=8
+            )
+            choices = [
+                label for label in range(1, num_labels)
+                if stats[label, cv2.CC_STAT_AREA]
+                >= self.center_window_min_component_pixels
+            ]
+            if not choices:
+                # 점선 사이 공백에서는 현재 위치를 유지해 다음 조각을 계속 찾는다.
+                continue
+
+            label = min(
+                choices,
+                key=lambda item: abs((centroids[item][0] + x_low) - x_current),
+            )
+            local_y, local_x = np.where(labels == label)
+            xs, ys = local_x + x_low, local_y + y_low
+            x_current = float(xs.mean())
+            collected_x.extend(xs.tolist())
+            collected_y.extend(ys.tolist())
+
+        if len(collected_x) < self.center_window_min_component_pixels:
+            return None, len(collected_x)
+        if len(set(collected_y)) >= 3 and len(collected_x) >= 12:
+            slope, intercept = np.polyfit(collected_y, collected_x, 1)
+            line_x = float(slope * (height - 1) + intercept)
+        else:
+            line_x = float(np.mean(collected_x))
+        return line_x, len(collected_x)
+
     # ======================================================================
     # 조향 매핑 / 발행
     # ======================================================================
-    def map_line_x_to_offset(self, measured_x):
-        """오른쪽 실선 x를 기준 x로 되돌리는 offset(+/-45)을 만든다.
+    def map_line_x_to_offset(self, measured_x, target_x):
+        """검출한 기준선 x를 해당 목표 x로 되돌리는 offset(+/-45)을 만든다.
 
         measured_x < target(차가 오른쪽으로 치우침) -> error<0 -> offset<0 -> 좌조향.
+        오른쪽 실선과 중앙 점선은 x만 다를 뿐 같은 화면 좌표/부호 규약을 쓴다.
         """
-        error_px = float(measured_x) - self.target_right_x
+        error_px = float(measured_x) - float(target_x)
         normalized = np.clip(error_px / self.offset_error_limit_px, -1.0, 1.0)
         scaled = normalized * self.lane_offset_limit * self.offset_kp
         return int(round(np.clip(
@@ -566,13 +896,15 @@ class TimedLaneOffsetNggNode(Node):
 
     def publish_debug(
         self, src_msg, frame, status, line_mask, measured_x, measure_mode,
-        raw_offset=None,
+        raw_offset=None, target_x=None, line_kind='RIGHT', held_x=None,
     ):
         if not (self.debug_view or self.publish_debug_image):
             return
 
         debug = frame.copy()
         height, width = debug.shape[:2]
+        if target_x is None:
+            target_x = self.target_right_x
         # BEV 전체가 검출 ROI다.
         roi_top_y = 0
         roi_bottom_y = height - 1
@@ -600,11 +932,12 @@ class TimedLaneOffsetNggNode(Node):
 
         # 기준 x 세로선(주황) — "여기 오면 offset=0"
         self.draw_dashed_vline(
-            debug, self.target_right_x, roi_top_y, roi_bottom_y, (0, 165, 255)
+            debug, target_x, roi_top_y, roi_bottom_y, (0, 165, 255)
         )
         cv2.putText(
-            debug, f'target_x={self.target_right_x}',
-            (min(self.target_right_x + 6, width - 150), roi_top_y + 18),
+            debug,
+            f'target_{line_kind.lower()}_x={target_x}',
+            (min(target_x + 6, width - 190), roi_top_y + 18),
             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 2, cv2.LINE_AA,
         )
 
@@ -617,15 +950,36 @@ class TimedLaneOffsetNggNode(Node):
             )
             cv2.line(
                 debug, (mx, roi_bottom_y - 4),
-                (int(self.target_right_x), roi_bottom_y - 4), (255, 255, 255), 1,
+                (int(target_x), roi_bottom_y - 4), (255, 255, 255), 1,
             )
 
-        color = (0, 255, 0) if status == 'OK' else (0, 0, 255)
-        err = '--' if measured_x is None else f'{measured_x - self.target_right_x:+.0f}'
+        # 이번 프레임의 중앙선은 신뢰하지 않아 offset을 유지하는 중이다. 직전
+        # 정상 중앙선 위치는 보라색으로 남겨, 제어가 어느 위치를 유지하는지
+        # 디버그 화면에서도 바로 확인할 수 있게 한다.
+        if held_x is not None:
+            hx = int(round(held_x))
+            cv2.circle(debug, (hx, roi_bottom_y - 4), 8, (255, 0, 255), 2)
+            self.draw_dashed_vline(
+                debug, hx, near_top_y, roi_bottom_y, (255, 0, 255), dash=4
+            )
+            cv2.putText(
+                debug, f'HELD center_x={held_x:.0f}',
+                (min(hx + 6, width - 180), near_top_y + 18),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2, cv2.LINE_AA,
+            )
+
+        color = (0, 255, 0) if status in (
+            'OK', 'CENTER FALLBACK', 'CENTER STEP LIMITED'
+        ) else (0, 0, 255)
+        err = '--' if measured_x is None else f'{measured_x - target_x:+.0f}'
         lines = [
             f'status: {status}   mode: {measure_mode}',
-            f'right_x: {"--" if measured_x is None else f"{measured_x:.0f}"} '
-            f'-> target {self.target_right_x} (err {err})',
+            f'{line_kind.lower()}_x: {"--" if measured_x is None else f"{measured_x:.0f}"} '
+            f'-> target {target_x} (err {err})',
+            (
+                f'held_center_x: {held_x:.0f} (previous accepted)'
+                if held_x is not None else ''
+            ),
             f'offset: {raw_offset if raw_offset is not None else "--"} '
             f'(smoothed {self.last_offset:.1f})',
             f'green: min_px={self.green_min_pixels} near={self.green_near_distance_px}',

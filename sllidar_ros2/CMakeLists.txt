@@ -20,8 +20,17 @@ endif()
 
 set(SLLIDAR_SDK_PATH "./sdk/")
 
-FILE(GLOB SLLIDAR_SDK_SRC 
-  "${SLLIDAR_SDK_PATH}/src/arch/linux/*.cpp"
+if(APPLE)
+  # The SDK ships a Darwin implementation, but the original CMake file
+  # unconditionally compiled the Linux sources.
+  add_compile_definitions(_MACOS)
+  set(SLLIDAR_PLATFORM_SOURCE_DIR "macOS")
+else()
+  set(SLLIDAR_PLATFORM_SOURCE_DIR "linux")
+endif()
+
+FILE(GLOB SLLIDAR_SDK_SRC
+  "${SLLIDAR_SDK_PATH}/src/arch/${SLLIDAR_PLATFORM_SOURCE_DIR}/*.cpp"
   "${SLLIDAR_SDK_PATH}/src/hal/*.cpp"
   "${SLLIDAR_SDK_PATH}/src/*.cpp"
   "${SLLIDAR_SDK_PATH}/src/dataunpacker/*.cpp"
