@@ -14,3 +14,33 @@ PDF flow:
 timed:   /camera/high/image_raw -> lane_offset -> /lane_offset
 mission: /lane_info + /camera/high/image_raw -> lane_offset -> /lane_offset
 ```
+
+## mission_lane_offset_node의 바깥 차선 배제
+
+차로를 옮길 때 바깥 실선을 중앙 점선으로 오인하던 문제를 색으로 막는다.
+오른쪽 바깥 실선 밖에는 초록 매트, 왼쪽 바깥 실선 밖에는 밝은 회색 영역이
+있고 중앙 점선 양옆은 아스팔트뿐이라는 점을 이용한다.
+
+- 흰 덩어리 bbox의 바깥쪽 밴드에서 해당 색이 `outer_min_pixels` 이상 보이면
+  바깥 실선으로 보고 중앙 점선 후보에서 제외한다.
+- 한 번 바깥 실선으로 본 x는 기억해 두고, 초록/회색이 화면에서 사라진 뒤에도
+  그 주변 덩어리를 계속 제외한다. 색 없이 움직일 때는 도로 바깥 방향으로만
+  따라가며, 오래되거나(`outer_memory_max_age_frames`) 근처에 아무것도 없으면
+  (`outer_memory_max_misses`) 기억을 버린다.
+- 흰 선 가장자리 번짐은 밝은 회색으로 분류되기 쉬우므로 흰색에서
+  `outer_halo_margin_px` 안의 색은 근거로 쓰지 않는다.
+
+주요 파라미터(전부 `--ros-args -p` 로 조정 가능):
+
+| 파라미터 | 기본값 | 뜻 |
+| --- | --- | --- |
+| `outer_near_distance_px` | 20 | 덩어리에서 이 거리 안의 색만 근거로 본다 |
+| `outer_min_pixels` | 40 | 바깥 실선으로 인정할 최소 색 픽셀 수 |
+| `outer_halo_margin_px` | 5 | 흰 선 주변 이 거리의 색은 무시(번짐 제거) |
+| `outer_memory_tolerance_px` | 40 | 기억 위치에서 이 거리 안이면 같은 바깥 실선 |
+| `outer_memory_max_age_frames` | 90 | 색 재확인 없이 유지할 최대 프레임 |
+| `outer_memory_max_misses` | 10 | 근처에 덩어리가 없어도 버틸 프레임 |
+
+디버그 화면에서 하늘색 박스가 배제된 바깥 실선(`color`=색으로 확인,
+`memory`=기억으로 유지), 자홍 박스가 중앙 점선으로 선택된 덩어리다.
+초록/회색 임계값은 `sensor_utils`의 `hsv_tuner_node`로 맞춘다.
