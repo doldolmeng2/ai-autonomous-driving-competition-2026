@@ -52,6 +52,7 @@ def generate_launch_description():
             parameters=[{
                 'max_drive_pwm': 140,
                 'steer_pwm': 150,
+                'steering_control_mode': 'pid',
                 'steer_max_angle_deg': 45.0,
                 'steer_angle_tolerance_deg': 1.0,
                 'steer_raw_left': 560,

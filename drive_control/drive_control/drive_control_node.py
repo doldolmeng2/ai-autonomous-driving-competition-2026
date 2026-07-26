@@ -30,12 +30,21 @@ STEER_PID_INTEGRAL_LIMIT_PWM = 30.0
 STEER_PID_DERIVATIVE_FILTER_ALPHA = 0.25
 STEER_MIN_PWM = 40
 
+# The parking controller publishes an already-calculated steering target.  Its
+# low-gain proportional loop avoids amplifying a small target update into a
+# large steering-motor correction while retaining raw-angle feedback.
+PARKING_STEER_PID_KP = 4.0
+PARKING_STEER_PID_KI = 0.0
+PARKING_STEER_PID_KD = 0.0
+
 
 class DriveControlNode(Node):
     """Translate /motor_control targets into steering and drive PWM."""
 
     def __init__(self):
         super().__init__('drive_control_node')
+        # parking.launch.py remaps this node to ``parking_drive_control``.
+        self.parking_mode = self.get_name() == 'parking_drive_control'
         self.declare_parameter('motor_control_topic', MOTOR_CONTROL_TOPIC)
         self.declare_parameter('arduino_command_topic', ARDUINO_COMMAND_TOPIC)
         self.declare_parameter('steering_raw_topic', STEERING_RAW_TOPIC)
@@ -148,6 +157,13 @@ class DriveControlNode(Node):
                 abs(int(self.get_parameter('steer_min_pwm').value)),
             ),
         )
+        if self.parking_mode:
+            # parking.launch.py gives this node the parking_drive_control
+            # name. Keep parking PID fixed here even if generic controller
+            # parameters are supplied by another launch/config file.
+            self.steer_pid_kp = PARKING_STEER_PID_KP
+            self.steer_pid_ki = PARKING_STEER_PID_KI
+            self.steer_pid_kd = PARKING_STEER_PID_KD
         if not (
             self.steer_raw_left
             > self.steer_raw_center

@@ -82,8 +82,8 @@ def generate_launch_description() -> LaunchDescription:
         ),
         Node(
             package='parking',
-            executable='parking_node_osy',
-            name='parking_node_osy',
+            executable='parking_node_yym',
+            name='parking_node_yym',
             output='screen',
             parameters=[{'debug_view': True}],
         ),
@@ -96,6 +96,9 @@ def generate_launch_description() -> LaunchDescription:
             parameters=[{
                 'max_drive_pwm': 130,
                 'steer_pwm': 150,
+                'steer_pid_kp': 4.0,
+                'steer_pid_ki': 0.0,
+                'steer_pid_kd': 0.0,
                 'steer_max_angle_deg': 45.0,
                 'steer_angle_tolerance_deg': 1.0,
                 'steer_raw_left': 560,
