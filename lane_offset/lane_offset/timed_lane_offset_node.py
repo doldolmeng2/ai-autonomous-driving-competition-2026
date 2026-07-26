@@ -120,7 +120,7 @@ MIN_LINE_ASPECT_RATIO = 0.0   # 세로/가로 비. 동글동글한 꽃 그림 �
 # 차가 정상 위치일 때 오른쪽 실선이 있어야 할 BEV 화면 x.
 # 기존 카메라 좌표 보정값을 유지한 값이므로, BEV 적용 후에는 디버그 화면의
 # right_x를 보고 다시 조정해야 한다.
-TARGET_RIGHT_X = 470
+TARGET_RIGHT_X = 510
 # 조향에 쓰는 x는 BEV 바닥에서 이 픽셀 수 이내(차량과 가장 가까운 구간)의
 # 실선 픽셀만 사용한다. 커브에서 먼 쪽 곡률에 끌려가지 않게 하는 핵심 값.
 NEAR_ROWS = 80
@@ -133,11 +133,11 @@ ALLOW_LINE_BOTTOM_FALLBACK = True
 # 기준선과 이만큼 차이 나면 lane_offset 최대/최소(+/-45)에 도달한다.
 OFFSET_ERROR_LIMIT_PX = 130
 LANE_OFFSET_LIMIT = 45
-OFFSET_KP = 2
+OFFSET_KP = 1.0
 # 한 프레임 사이 offset이 이보다 크게 튀면 오검출로 보고 직전 값을 유지한다.
 MAX_OFFSET_JUMP = 2000
 # 발행 offset 저역통과(EMA) 계수. 1.0이면 필터 없음.
-OFFSET_SMOOTHING_ALPHA = 0.7
+OFFSET_SMOOTHING_ALPHA = 1.0
 
 # 디버그 시각화
 DEBUG_VIEW = False

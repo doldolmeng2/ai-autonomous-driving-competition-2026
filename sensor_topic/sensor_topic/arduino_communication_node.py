@@ -6,7 +6,7 @@ from glob import glob
 
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Float32MultiArray, Int16MultiArray
+from std_msgs.msg import Float32MultiArray, Int16, Int16MultiArray
 
 from .serial_port import open_serial
 
@@ -32,6 +32,26 @@ def parse_ultrasonic_line(line, sensor_count=6):
     return values
 
 
+def parse_rotation_line(line):
+    """Return the A1 raw value from a complete R frame, else None."""
+    parts = [part.strip() for part in line.split(',')]
+    if len(parts) != 4 or parts[0] != 'R':
+        return None
+    try:
+        raw_value = int(parts[1])
+        voltage = float(parts[2])
+        percent = int(parts[3])
+    except ValueError:
+        return None
+    if (
+        not 0 <= raw_value <= 1023
+        or not math.isfinite(voltage)
+        or not 0 <= percent <= 100
+    ):
+        return None
+    return raw_value
+
+
 class ArduinoCommunicationNode(Node):
     """Own the Arduino port, prioritize motor TX, then process sensor RX."""
 
@@ -42,6 +62,9 @@ class ArduinoCommunicationNode(Node):
         self.declare_parameter('arduino_boot_delay', 2.0)
         self.declare_parameter('command_topic', '/arduino/motor_command')
         self.declare_parameter('ultrasonic_raw_topic', '/arduino/ultrasonic_raw')
+        self.declare_parameter(
+            'steering_raw_topic', '/arduino/steering_raw'
+        )
         self.declare_parameter('sensor_count', 6)
         self.declare_parameter('command_rate_hz', 20.0)
         self.declare_parameter('command_timeout_sec', 0.5)
@@ -84,6 +107,11 @@ class ArduinoCommunicationNode(Node):
         self.ultrasonic_publisher = self.create_publisher(
             Float32MultiArray,
             str(self.get_parameter('ultrasonic_raw_topic').value),
+            10,
+        )
+        self.steering_raw_publisher = self.create_publisher(
+            Int16,
+            str(self.get_parameter('steering_raw_topic').value),
             10,
         )
         self.create_subscription(
@@ -202,6 +230,13 @@ class ArduinoCommunicationNode(Node):
                 message = Float32MultiArray()
                 message.data = values
                 self.ultrasonic_publisher.publish(message)
+                continue
+
+            steering_raw = parse_rotation_line(line)
+            if steering_raw is not None:
+                message = Int16()
+                message.data = steering_raw
+                self.steering_raw_publisher.publish(message)
             elif self.debug_serial_lines:
                 self.get_logger().info(f'Ignored Arduino line: {line}')
 

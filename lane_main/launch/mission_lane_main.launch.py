@@ -13,6 +13,7 @@ def generate_launch_description():
     sensor_topic_share = Path(get_package_share_directory('sensor_topic'))
     use_hardware = LaunchConfiguration('use_hardware')
     debug_view = LaunchConfiguration('debug_view')
+    debug_window_name = LaunchConfiguration('debug_window_name')
     driving_mode = LaunchConfiguration('driving_mode')
     reference_x_1lane = LaunchConfiguration('reference_x_1lane')
     reference_x_2lane = LaunchConfiguration('reference_x_2lane')
@@ -22,6 +23,9 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('use_hardware', default_value='true'),
         DeclareLaunchArgument('debug_view', default_value='true'),
+        DeclareLaunchArgument(
+            'debug_window_name', default_value='mission_lane_main_debug'
+        ),
         DeclareLaunchArgument('driving_mode', default_value='1lane'),
         DeclareLaunchArgument('reference_x_1lane', default_value='500'),
         DeclareLaunchArgument('reference_x_2lane', default_value='208'),
@@ -73,6 +77,8 @@ def generate_launch_description():
             output='screen',
             parameters=[{
                 'driving_mode': driving_mode,
+                'debug_view': ParameterValue(debug_view, value_type=bool),
+                'debug_window_name': debug_window_name,
                 'lane_change_close_confirm_samples': ParameterValue(
                     close_confirm_samples, value_type=int
                 ),
@@ -90,8 +96,11 @@ def generate_launch_description():
                 'max_drive_pwm': 130,
                 'steer_pwm': 150,
                 'steer_max_angle_deg': 45.0,
-                'steer_center_time': 0.45,
                 'steer_angle_tolerance_deg': 1.0,
+                'steer_raw_left': 560,
+                'steer_raw_center': 490,
+                'steer_raw_right': 420,
+                'steering_feedback_timeout_sec': 0.5,
             }],
         ),
     ])

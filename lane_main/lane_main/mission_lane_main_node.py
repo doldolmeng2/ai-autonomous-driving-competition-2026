@@ -1,5 +1,7 @@
 import math
 
+import cv2
+import numpy as np
 import rclpy
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.node import Node
@@ -19,6 +21,8 @@ LANE_CHANGE_CLOSE_DISTANCE = 0.6
 LANE_CHANGE_CLEAR_DISTANCE = 1.0
 LANE_CHANGE_CLOSE_CONFIRM_SAMPLES = 5
 LANE_CHANGE_CLEAR_CONFIRM_SAMPLES = 3
+DEBUG_VIEW = True
+DEBUG_WINDOW_NAME = 'mission_lane_main_debug'
 
 
 class MissionLaneMainNode(Node):
@@ -52,6 +56,8 @@ class MissionLaneMainNode(Node):
             'lane_change_clear_confirm_samples',
             LANE_CHANGE_CLEAR_CONFIRM_SAMPLES,
         )
+        self.declare_parameter('debug_view', DEBUG_VIEW)
+        self.declare_parameter('debug_window_name', DEBUG_WINDOW_NAME)
 
         self.base_speed = int(self.get_parameter('base_speed').value)
         self.max_steer = int(self.get_parameter('max_steer').value)
@@ -77,6 +83,10 @@ class MissionLaneMainNode(Node):
         self.lane_change_clear_confirm_samples = max(
             1,
             int(self.get_parameter('lane_change_clear_confirm_samples').value),
+        )
+        self.debug_view = bool(self.get_parameter('debug_view').value)
+        self.debug_window_name = str(
+            self.get_parameter('debug_window_name').value
         )
 
         qos = QoSProfile(
@@ -124,6 +134,13 @@ class MissionLaneMainNode(Node):
 
     def low_image_callback(self, msg):
         self.low_image = msg
+        if not self.debug_view:
+            return
+
+        frame = self.to_bgr(msg)
+        if frame is None:
+            return
+        self.show_debug_view(frame)
 
     def ultrasonic_callback(self, msg, sensor_index):
         distance = float(msg.range)
@@ -195,6 +212,115 @@ class MissionLaneMainNode(Node):
         lane_info = Int16()
         lane_info.data = self.lane_number
         self.lane_info_pub.publish(lane_info)
+
+    def show_debug_view(self, frame):
+        """저해상도 카메라 위에 미션 차선 및 3/4번 초음파 상태를 표시한다."""
+        debug = frame.copy()
+        active_sensor = 3 if self.lane_number == 2 else 4
+        panel_height = min(debug.shape[0], 170)
+        panel_width = min(debug.shape[1], 500)
+        overlay = debug.copy()
+        cv2.rectangle(
+            overlay, (0, 0), (panel_width, panel_height), (0, 0, 0), -1
+        )
+        cv2.addWeighted(overlay, 0.65, debug, 0.35, 0.0, debug)
+
+        state = 'ARMED: WAIT CLEAR' if self.lane_change_armed else 'WATCH CLOSE'
+        lines = [
+            ('MISSION LANE MAIN', (255, 255, 255)),
+            (
+                f'mode: {self.driving_mode}  active ultrasonic: {active_sensor}',
+                (0, 255, 255),
+            ),
+            self.ultrasonic_debug_line(3, active_sensor),
+            self.ultrasonic_debug_line(4, active_sensor),
+            (
+                f'state: {state}  close={self.close_sample_count}/'
+                f'{self.lane_change_close_confirm_samples}  '
+                f'clear={self.clear_sample_count}/'
+                f'{self.lane_change_clear_confirm_samples}',
+                (0, 255, 0) if self.lane_change_armed else (255, 255, 255),
+            ),
+            (
+                f'thresholds: close<={self.lane_change_close_distance:.2f}m  '
+                f'clear>{self.lane_change_clear_distance:.2f}m',
+                (200, 200, 200),
+            ),
+        ]
+        for index, (text, color) in enumerate(lines):
+            cv2.putText(
+                debug,
+                text,
+                (10, 24 + index * 27),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.62,
+                color,
+                2,
+                cv2.LINE_AA,
+            )
+
+        cv2.imshow(self.debug_window_name, debug)
+        cv2.waitKey(1)
+
+    def ultrasonic_debug_line(self, sensor_index, active_sensor):
+        distance = self.ultrasonic_ranges.get(sensor_index)
+        active_text = 'ACTIVE' if sensor_index == active_sensor else 'standby'
+        if distance is None:
+            value_text = '--'
+            state_text = 'NO DATA'
+            color = (128, 128, 128)
+        elif not math.isfinite(distance) or distance < 0.0:
+            value_text = 'INF'
+            state_text = 'INVALID'
+            color = (0, 0, 255)
+        elif distance <= self.lane_change_close_distance:
+            value_text = f'{distance:.2f} m'
+            state_text = 'CLOSE'
+            color = (0, 0, 255)
+        elif distance > self.lane_change_clear_distance:
+            value_text = f'{distance:.2f} m'
+            state_text = 'CLEAR'
+            color = (0, 255, 0)
+        else:
+            value_text = f'{distance:.2f} m'
+            state_text = 'MID'
+            color = (0, 255, 255)
+        return (
+            f'ultrasonic {sensor_index}: {value_text}  [{state_text}, {active_text}]',
+            color,
+        )
+
+    def to_bgr(self, msg):
+        data = np.frombuffer(msg.data, dtype=np.uint8)
+        try:
+            if msg.encoding in ('yuv422_yuy2', 'yuyv', 'yuyv422'):
+                yuyv = data.reshape((msg.height, msg.width, 2))
+                return cv2.cvtColor(yuyv, cv2.COLOR_YUV2BGR_YUY2)
+            if msg.encoding in ('bgr8', '8UC3'):
+                return data.reshape((msg.height, msg.width, 3))
+            if msg.encoding == 'rgb8':
+                rgb = data.reshape((msg.height, msg.width, 3))
+                return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+            if msg.encoding in ('mono8', '8UC1'):
+                mono = data.reshape((msg.height, msg.width))
+                return cv2.cvtColor(mono, cv2.COLOR_GRAY2BGR)
+        except ValueError as error:
+            self.get_logger().warn(
+                f'Invalid low camera image buffer: {error}',
+                throttle_duration_sec=5.0,
+            )
+            return None
+
+        self.get_logger().warn(
+            f'Unsupported low camera encoding: {msg.encoding}',
+            throttle_duration_sec=5.0,
+        )
+        return None
+
+    def destroy_node(self):
+        if self.debug_view:
+            cv2.destroyAllWindows()
+        return super().destroy_node()
 
 
 def main(args=None):

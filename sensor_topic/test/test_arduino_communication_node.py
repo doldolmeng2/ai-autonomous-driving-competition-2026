@@ -4,6 +4,7 @@ import pytest
 
 from sensor_topic.arduino_communication_node import (
     ArduinoCommunicationNode,
+    parse_rotation_line,
     parse_ultrasonic_line,
 )
 
@@ -42,6 +43,14 @@ class FakeSerial:
         self.events.append('flush')
 
 
+class FakeScalarPublisher:
+    def __init__(self):
+        self.messages = []
+
+    def publish(self, message):
+        self.messages.append(message.data)
+
+
 def test_parse_complete_ultrasonic_frame():
     values = parse_ultrasonic_line('U,0.898,2.411,nan,0.850,1.200,0.300')
     assert values[:2] == [0.898, 2.411]
@@ -54,6 +63,33 @@ def test_reject_partial_or_malformed_frame():
     assert parse_ultrasonic_line('U') is None
     assert parse_ultrasonic_line('U,1,2,bad,4,5,6') is None
     assert parse_ultrasonic_line('debug') is None
+
+
+def test_parse_complete_rotation_frame():
+    assert parse_rotation_line('R,560,2.74,55') == 560
+    assert parse_rotation_line('R,420,2.05,41') == 420
+
+
+def test_reject_malformed_rotation_frame():
+    assert parse_rotation_line('R,1024,5.00,100') is None
+    assert parse_rotation_line('R,bad,2.50,50') is None
+    assert parse_rotation_line('R,490,2.40') is None
+
+
+def test_rotation_frame_is_published_separately():
+    node = object.__new__(ArduinoCommunicationNode)
+    node.serial = FakeSerial()
+    node.rx_buffer = bytearray()
+    node.sensor_count = 6
+    node.debug_serial_lines = False
+    node.ultrasonic_publisher = FakePublisher()
+    node.steering_raw_publisher = FakeScalarPublisher()
+
+    node.serial.feed(b'U,1,2,3,4,5,6\nR,490,2.39,48\n')
+    node.read_available()
+
+    assert node.ultrasonic_publisher.messages == [[1, 2, 3, 4, 5, 6]]
+    assert node.steering_raw_publisher.messages == [490]
 
 
 def test_fragmented_and_bad_frames_do_not_close_serial():

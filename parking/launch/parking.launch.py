@@ -97,8 +97,11 @@ def generate_launch_description() -> LaunchDescription:
                 'max_drive_pwm': 130,
                 'steer_pwm': 150,
                 'steer_max_angle_deg': 45.0,
-                'steer_center_time': 0.45,
                 'steer_angle_tolerance_deg': 1.0,
+                'steer_raw_left': 560,
+                'steer_raw_center': 490,
+                'steer_raw_right': 420,
+                'steering_feedback_timeout_sec': 0.5,
             }],
         ),
     ])

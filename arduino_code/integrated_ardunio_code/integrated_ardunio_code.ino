@@ -5,7 +5,9 @@
   in the parent directory are not compiled with it.
 
   Serial input:  "<steer> <speed>\n"  (for example: "-30 20")
-  Serial output: "U,<r1>,<r2>,<r3>,<r4>,<r5>,<r6>\n" in metres.
+  Serial output:
+    "U,<r1>,<r2>,<r3>,<r4>,<r5>,<r6>\n" in metres.
+    "R,<raw>,<voltage>,<percent>\n" for the A1 rotation sensor.
 
   Motor control has priority:
     - commands are serviced before and after every ultrasonic measurement;
@@ -26,6 +28,8 @@ constexpr uint8_t MOTOR2_IN2 = 10;
 constexpr uint8_t SENSOR_COUNT = 6;
 constexpr uint8_t TRIG_PINS[SENSOR_COUNT] = {22, 26, 30, 34, 38, 44};
 constexpr uint8_t ECHO_PINS[SENSOR_COUNT] = {23, 27, 31, 35, 39, 45};
+constexpr uint8_t ROTATION_SENSOR_PIN = A1;
+constexpr uint8_t ROTATION_SAMPLE_COUNT = 8;
 
 constexpr int MAX_STEER_PWM = 150;
 constexpr int MAX_DRIVE_PWM = 140;
@@ -176,8 +180,8 @@ void publishUltrasonics() {
     }
   }
 
-  // No motor/debug text is ever written to Serial, so this is the only
-  // outbound protocol and a receiver can frame it reliably by newline.
+  // 초음파와 회전 센서는 서로 다른 접두사의 완전한 한 줄 프레임으로 보내
+  // 수신 측에서 U/R 데이터를 안전하게 구분할 수 있게 한다.
   Serial.print(F("U"));
   for (uint8_t index = 0; index < SENSOR_COUNT; ++index) {
     Serial.print(',');
@@ -190,6 +194,24 @@ void publishUltrasonics() {
   Serial.println();
 }
 
+void publishRotationSensor() {
+  unsigned long sum = 0;
+  for (uint8_t index = 0; index < ROTATION_SAMPLE_COUNT; ++index) {
+    sum += analogRead(ROTATION_SENSOR_PIN);
+  }
+
+  const int rawValue = sum / ROTATION_SAMPLE_COUNT;
+  const float voltage = rawValue * (5.0F / 1023.0F);
+  const int percent = map(rawValue, 0, 1023, 0, 100);
+
+  Serial.print(F("R,"));
+  Serial.print(rawValue);
+  Serial.print(',');
+  Serial.print(voltage, 2);
+  Serial.print(',');
+  Serial.println(percent);
+}
+
 void setup() {
   Serial.begin(115200);
   pinMode(STEER_IN1, OUTPUT);
@@ -197,8 +219,8 @@ void setup() {
   pinMode(MOTOR1_IN1, OUTPUT);
   pinMode(MOTOR1_IN2, OUTPUT);
   pinMode(MOTOR2_IN1, OUTPUT);
-  
   pinMode(MOTOR2_IN2, OUTPUT);
+  pinMode(ROTATION_SENSOR_PIN, INPUT);
   for (uint8_t index = 0; index < SENSOR_COUNT; ++index) {
     pinMode(TRIG_PINS[index], OUTPUT);
     pinMode(ECHO_PINS[index], INPUT);
@@ -216,7 +238,9 @@ void loop() {
   const unsigned long now = millis();
   if (now - lastSensorAt >= SENSOR_PERIOD_MS) {
     lastSensorAt = now;
+    // 순서: 조향/주행 명령 처리 -> 초음파 측정/전송 -> A1 회전값 전송.
+    serviceMotorControl();
     publishUltrasonics();
+    publishRotationSensor();
   }
 }
-

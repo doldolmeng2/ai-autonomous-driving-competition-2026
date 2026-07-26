@@ -5,21 +5,30 @@ exclusively owns the device and consumes /arduino/motor_command.
 """
 
 import rclpy
-from rclpy.duration import Duration
 from rclpy.node import Node
-from std_msgs.msg import Int16MultiArray
+from std_msgs.msg import Int16, Int16MultiArray
 
 
 MOTOR_CONTROL_TOPIC = '/motor_control'
 ARDUINO_COMMAND_TOPIC = '/arduino/motor_command'
+STEERING_RAW_TOPIC = '/arduino/steering_raw'
 COMMAND_RATE = 20.0
 INPUT_TIMEOUT = 0.5
+STEERING_FEEDBACK_TIMEOUT = 0.5
 
 MAX_DRIVE_PWM = 140
 STEER_PWM = 150
 STEER_MAX_ANGLE_DEG = 45.0
-STEER_CENTER_TIME = 0.45
 STEER_ANGLE_TOLERANCE_DEG = 1.0
+STEER_RAW_LEFT = 560
+STEER_RAW_CENTER = 490
+STEER_RAW_RIGHT = 420
+STEER_PID_KP = 12.0
+STEER_PID_KI = 0.0
+STEER_PID_KD = 0.2
+STEER_PID_INTEGRAL_LIMIT_PWM = 30.0
+STEER_PID_DERIVATIVE_FILTER_ALPHA = 0.25
+STEER_MIN_PWM = 40
 
 
 class DriveControlNode(Node):
@@ -29,16 +38,35 @@ class DriveControlNode(Node):
         super().__init__('drive_control_node')
         self.declare_parameter('motor_control_topic', MOTOR_CONTROL_TOPIC)
         self.declare_parameter('arduino_command_topic', ARDUINO_COMMAND_TOPIC)
+        self.declare_parameter('steering_raw_topic', STEERING_RAW_TOPIC)
         self.declare_parameter('command_rate_hz', COMMAND_RATE)
         self.declare_parameter('input_timeout_sec', INPUT_TIMEOUT)
+        self.declare_parameter(
+            'steering_feedback_timeout_sec',
+            STEERING_FEEDBACK_TIMEOUT,
+        )
         self.declare_parameter('max_drive_pwm', MAX_DRIVE_PWM)
         self.declare_parameter('steer_pwm', STEER_PWM)
         self.declare_parameter('steer_max_angle_deg', STEER_MAX_ANGLE_DEG)
-        self.declare_parameter('steer_center_time', STEER_CENTER_TIME)
         self.declare_parameter(
             'steer_angle_tolerance_deg',
             STEER_ANGLE_TOLERANCE_DEG,
         )
+        self.declare_parameter('steer_raw_left', STEER_RAW_LEFT)
+        self.declare_parameter('steer_raw_center', STEER_RAW_CENTER)
+        self.declare_parameter('steer_raw_right', STEER_RAW_RIGHT)
+        self.declare_parameter('steer_pid_kp', STEER_PID_KP)
+        self.declare_parameter('steer_pid_ki', STEER_PID_KI)
+        self.declare_parameter('steer_pid_kd', STEER_PID_KD)
+        self.declare_parameter(
+            'steer_pid_integral_limit_pwm',
+            STEER_PID_INTEGRAL_LIMIT_PWM,
+        )
+        self.declare_parameter(
+            'steer_pid_derivative_filter_alpha',
+            STEER_PID_DERIVATIVE_FILTER_ALPHA,
+        )
+        self.declare_parameter('steer_min_pwm', STEER_MIN_PWM)
 
         self.motor_control_topic = str(
             self.get_parameter('motor_control_topic').value
@@ -46,11 +74,22 @@ class DriveControlNode(Node):
         self.arduino_command_topic = str(
             self.get_parameter('arduino_command_topic').value
         )
+        self.steering_raw_topic = str(
+            self.get_parameter('steering_raw_topic').value
+        )
         self.command_rate_hz = max(
             1.0, float(self.get_parameter('command_rate_hz').value)
         )
         self.input_timeout = max(
             0.05, float(self.get_parameter('input_timeout_sec').value)
+        )
+        self.steering_feedback_timeout = max(
+            0.05,
+            float(
+                self.get_parameter(
+                    'steering_feedback_timeout_sec'
+                ).value
+            ),
         )
         self.max_drive_pwm = max(
             0, min(255, int(self.get_parameter('max_drive_pwm').value))
@@ -61,26 +100,75 @@ class DriveControlNode(Node):
         self.steer_max_angle_deg = max(
             1.0, abs(float(self.get_parameter('steer_max_angle_deg').value))
         )
-        self.steer_center_time = max(
-            0.01, float(self.get_parameter('steer_center_time').value)
-        )
         self.steer_angle_tolerance_deg = max(
             0.0,
             float(self.get_parameter('steer_angle_tolerance_deg').value),
         )
-        self.steer_speed_deg_per_sec = (
-            self.steer_max_angle_deg / self.steer_center_time
+        self.steer_raw_left = int(
+            self.get_parameter('steer_raw_left').value
         )
+        self.steer_raw_center = int(
+            self.get_parameter('steer_raw_center').value
+        )
+        self.steer_raw_right = int(
+            self.get_parameter('steer_raw_right').value
+        )
+        self.steer_pid_kp = max(
+            0.0, float(self.get_parameter('steer_pid_kp').value)
+        )
+        self.steer_pid_ki = max(
+            0.0, float(self.get_parameter('steer_pid_ki').value)
+        )
+        self.steer_pid_kd = max(
+            0.0, float(self.get_parameter('steer_pid_kd').value)
+        )
+        self.steer_pid_integral_limit_pwm = max(
+            0.0,
+            float(
+                self.get_parameter(
+                    'steer_pid_integral_limit_pwm'
+                ).value
+            ),
+        )
+        self.steer_pid_derivative_filter_alpha = max(
+            0.0,
+            min(
+                1.0,
+                float(
+                    self.get_parameter(
+                        'steer_pid_derivative_filter_alpha'
+                    ).value
+                ),
+            ),
+        )
+        self.steer_min_pwm = max(
+            0,
+            min(
+                self.steer_pwm,
+                abs(int(self.get_parameter('steer_min_pwm').value)),
+            ),
+        )
+        if not (
+            self.steer_raw_left
+            > self.steer_raw_center
+            > self.steer_raw_right
+        ):
+            self.get_logger().warn(
+                'Invalid steering raw calibration; using 560/490/420'
+            )
+            self.steer_raw_left = STEER_RAW_LEFT
+            self.steer_raw_center = STEER_RAW_CENTER
+            self.steer_raw_right = STEER_RAW_RIGHT
 
         self.last_input_time = None
+        self.last_steering_feedback_time = None
         self.drive_pwm = 0
         self.target_steer_angle_deg = 0.0
         self.steer_angle_deg = 0.0
-        self.last_steer_update_time = None
-        self.steer_motion_direction = 0
-        self.steer_motion_end_time = None
-        self.steer_motion_target_angle_deg = 0.0
-        self.steer_plan_dirty = False
+        self.steer_raw_value = None
+        self.steer_angle_velocity_deg_per_sec = 0.0
+        self.pid_integral_error = 0.0
+        self.last_pid_update_time = None
 
         self.command_publisher = self.create_publisher(
             Int16MultiArray,
@@ -93,10 +181,22 @@ class DriveControlNode(Node):
             self.motor_control_callback,
             10,
         )
+        self.create_subscription(
+            Int16,
+            self.steering_raw_topic,
+            self.steering_feedback_callback,
+            10,
+        )
         self.create_timer(1.0 / self.command_rate_hz, self.timer_callback)
         self.get_logger().info(
             f'{self.motor_control_topic} target -> '
-            f'{self.arduino_command_topic} PWM; no direct serial access'
+            f'{self.arduino_command_topic} PWM using '
+            f'{self.steering_raw_topic} closed-loop feedback; '
+            f'raw left/center/right='
+            f'{self.steer_raw_left}/{self.steer_raw_center}/'
+            f'{self.steer_raw_right}; PID='
+            f'{self.steer_pid_kp:.2f}/{self.steer_pid_ki:.2f}/'
+            f'{self.steer_pid_kd:.2f}'
         )
 
     def motor_control_callback(self, msg):
@@ -105,68 +205,149 @@ class DriveControlNode(Node):
         speed = int(msg.data[1]) if len(msg.data) > 1 else 0
         self.drive_pwm = self.limit_drive_pwm(speed)
 
-        target = self.clamp_steer_angle(steer)
-        if target != self.target_steer_angle_deg:
-            self.target_steer_angle_deg = target
-            self.steer_plan_dirty = True
+        previous_error = (
+            self.target_steer_angle_deg - self.steer_angle_deg
+        )
+        self.target_steer_angle_deg = self.clamp_steer_angle(steer)
+        next_error = self.target_steer_angle_deg - self.steer_angle_deg
+        if previous_error * next_error < 0.0:
+            self.pid_integral_error = 0.0
+
+    def steering_feedback_callback(self, msg):
+        raw_value = int(msg.data)
+        if not 0 <= raw_value <= 1023:
+            return
+        now = self.get_clock().now()
+        next_angle = self.raw_to_steer_angle(raw_value)
+        if self.last_steering_feedback_time is not None:
+            feedback_dt = (
+                now - self.last_steering_feedback_time
+            ).nanoseconds / 1e9
+            if (
+                feedback_dt > 0.0
+                and feedback_dt
+                <= self.steering_feedback_timeout * 2.0
+            ):
+                raw_velocity = (
+                    next_angle - self.steer_angle_deg
+                ) / feedback_dt
+                alpha = self.steer_pid_derivative_filter_alpha
+                self.steer_angle_velocity_deg_per_sec = (
+                    alpha * raw_velocity
+                    + (1.0 - alpha)
+                    * self.steer_angle_velocity_deg_per_sec
+                )
+            else:
+                self.steer_angle_velocity_deg_per_sec = 0.0
+        else:
+            self.steer_angle_velocity_deg_per_sec = 0.0
+        self.steer_raw_value = raw_value
+        self.steer_angle_deg = next_angle
+        self.last_steering_feedback_time = now
 
     def timer_callback(self):
         now = self.get_clock().now()
-        self.update_steer_position(now)
 
         if self.is_input_stale(now):
-            self.stop_steer_motion()
+            self.reset_pid_controller()
+            steer_pwm, drive_pwm = 0, 0
+        elif self.is_steering_feedback_stale(now):
+            self.reset_pid_controller()
+            self.get_logger().warn(
+                'Steering A1 feedback missing/stale; stopping vehicle',
+                throttle_duration_sec=1.0,
+            )
             steer_pwm, drive_pwm = 0, 0
         else:
-            if self.steer_plan_dirty:
-                self.start_steer_motion(now)
-            steer_pwm = self.steer_motion_direction * self.steer_pwm
+            steer_pwm = self.calculate_steer_pwm(self.pid_dt(now))
             drive_pwm = self.drive_pwm
         self.publish_command(steer_pwm, drive_pwm)
 
-    def update_steer_position(self, now):
-        if self.last_steer_update_time is None:
-            self.last_steer_update_time = now
-            return
-        if self.steer_motion_direction == 0 or self.steer_motion_end_time is None:
-            self.last_steer_update_time = now
-            return
+    def pid_dt(self, now):
+        nominal_dt = 1.0 / self.command_rate_hz
+        if self.last_pid_update_time is None:
+            dt = nominal_dt
+        else:
+            dt = (now - self.last_pid_update_time).nanoseconds / 1e9
+            dt = max(0.001, min(dt, nominal_dt * 2.0))
+        self.last_pid_update_time = now
+        return dt
 
-        move_until = min(now, self.steer_motion_end_time)
-        dt = (move_until - self.last_steer_update_time).nanoseconds / 1e9
-        self.last_steer_update_time = now
-        if dt > 0.0:
-            self.steer_angle_deg = self.clamp_steer_angle(
-                self.steer_angle_deg
-                + self.steer_motion_direction
-                * self.steer_speed_deg_per_sec
-                * dt
-            )
-        if now >= self.steer_motion_end_time:
-            self.steer_angle_deg = self.steer_motion_target_angle_deg
-            self.steer_motion_direction = 0
-            self.steer_motion_end_time = None
-
-    def start_steer_motion(self, now):
+    def calculate_steer_pwm(self, dt=None):
+        if dt is None:
+            dt = 1.0 / self.command_rate_hz
+        dt = max(0.001, float(dt))
         error = self.target_steer_angle_deg - self.steer_angle_deg
-        self.steer_plan_dirty = False
         if abs(error) <= self.steer_angle_tolerance_deg:
-            self.steer_angle_deg = self.target_steer_angle_deg
-            self.stop_steer_motion()
-            return
+            self.pid_integral_error = 0.0
+            return 0
 
-        duration = abs(error) / self.steer_speed_deg_per_sec
-        self.steer_motion_direction = 1 if error > 0.0 else -1
-        self.steer_motion_target_angle_deg = self.target_steer_angle_deg
-        self.steer_motion_end_time = now + Duration(seconds=duration)
-        self.last_steer_update_time = now
+        candidate_integral = self.pid_integral_error + error * dt
+        if self.steer_pid_ki > 0.0:
+            integral_limit = (
+                self.steer_pid_integral_limit_pwm / self.steer_pid_ki
+            )
+            candidate_integral = max(
+                -integral_limit,
+                min(integral_limit, candidate_integral),
+            )
+        else:
+            candidate_integral = 0.0
 
-    def stop_steer_motion(self):
-        self.steer_motion_direction = 0
-        self.steer_motion_end_time = None
-        self.target_steer_angle_deg = self.steer_angle_deg
-        self.steer_motion_target_angle_deg = self.steer_angle_deg
-        self.steer_plan_dirty = False
+        proportional = self.steer_pid_kp * error
+        derivative = (
+            -self.steer_pid_kd
+            * self.steer_angle_velocity_deg_per_sec
+        )
+        candidate_output = (
+            proportional
+            + self.steer_pid_ki * candidate_integral
+            + derivative
+        )
+
+        # 출력 포화 방향으로 적분이 더 쌓이는 경우에는 이번 적분을 버린다.
+        if (
+            abs(candidate_output) > self.steer_pwm
+            and candidate_output * error > 0.0
+        ):
+            output = (
+                proportional
+                + self.steer_pid_ki * self.pid_integral_error
+                + derivative
+            )
+        else:
+            self.pid_integral_error = candidate_integral
+            output = candidate_output
+
+        output = max(-self.steer_pwm, min(self.steer_pwm, output))
+        if 0.0 < abs(output) < self.steer_min_pwm:
+            output = self.steer_min_pwm if output > 0.0 else -self.steer_min_pwm
+        return int(round(output))
+
+    def reset_pid_controller(self):
+        self.pid_integral_error = 0.0
+        self.last_pid_update_time = None
+
+    def raw_to_steer_angle(self, raw_value):
+        raw_value = max(
+            self.steer_raw_right,
+            min(self.steer_raw_left, int(raw_value)),
+        )
+        if raw_value >= self.steer_raw_center:
+            raw_span = self.steer_raw_left - self.steer_raw_center
+            angle = -(
+                (raw_value - self.steer_raw_center)
+                * self.steer_max_angle_deg
+                / raw_span
+            )
+        else:
+            raw_span = self.steer_raw_center - self.steer_raw_right
+            angle = (
+                (self.steer_raw_center - raw_value)
+                * self.steer_max_angle_deg
+                / raw_span
+            )
+        return self.clamp_steer_angle(angle)
 
     def is_input_stale(self, now=None):
         if self.last_input_time is None:
@@ -175,6 +356,16 @@ class DriveControlNode(Node):
             now = self.get_clock().now()
         age = (now - self.last_input_time).nanoseconds / 1e9
         return age > self.input_timeout
+
+    def is_steering_feedback_stale(self, now=None):
+        if self.last_steering_feedback_time is None:
+            return True
+        if now is None:
+            now = self.get_clock().now()
+        age = (
+            now - self.last_steering_feedback_time
+        ).nanoseconds / 1e9
+        return age > self.steering_feedback_timeout
 
     def publish_command(self, steer_pwm, drive_pwm):
         message = Int16MultiArray()

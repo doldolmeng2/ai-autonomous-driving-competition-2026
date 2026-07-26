@@ -19,36 +19,75 @@ def test_pwm_command_is_published_without_serial_access():
     assert node.command_publisher.data == [180, 130]
 
 
-def make_steer_filter_node():
+def make_closed_loop_node():
     node = object.__new__(DriveControlNode)
-    node.steer_accumulation_threshold_deg = 15.0
-    node.steer_accumulator_deg = 0.0
+    node.steer_raw_left = 560
+    node.steer_raw_center = 490
+    node.steer_raw_right = 420
+    node.steer_max_angle_deg = 45.0
+    node.steer_angle_tolerance_deg = 1.0
+    node.steer_pwm = 150
+    node.steer_min_pwm = 40
+    node.steer_pid_kp = 2.0
+    node.steer_pid_ki = 0.0
+    node.steer_pid_kd = 0.8
+    node.steer_pid_integral_limit_pwm = 30.0
+    node.pid_integral_error = 0.0
+    node.steer_angle_velocity_deg_per_sec = 0.0
+    node.command_rate_hz = 20.0
+    node.target_steer_angle_deg = 0.0
+    node.steer_angle_deg = 0.0
     return node
 
 
-def test_small_steer_is_zero_until_accumulation_exceeds_threshold():
-    node = make_steer_filter_node()
+def test_raw_feedback_maps_to_calibrated_angles():
+    node = make_closed_loop_node()
 
-    assert node.filter_steer_target(5) == 0.0
-    assert node.filter_steer_target(5) == 0.0
-    assert node.filter_steer_target(5) == 0.0
-    assert node.steer_accumulator_deg == 15.0
-
-    assert node.filter_steer_target(1) == 16.0
-    assert node.steer_accumulator_deg == 0.0
+    assert node.raw_to_steer_angle(560) == -45.0
+    assert node.raw_to_steer_angle(490) == 0.0
+    assert node.raw_to_steer_angle(420) == 45.0
+    assert node.raw_to_steer_angle(525) == -22.5
+    assert node.raw_to_steer_angle(455) == 22.5
 
 
-def test_negative_small_steer_accumulates_and_resets():
-    node = make_steer_filter_node()
+def test_positive_error_commands_right_pwm():
+    node = make_closed_loop_node()
+    node.target_steer_angle_deg = 45.0
+    node.steer_angle_deg = -45.0
 
-    assert node.filter_steer_target(-8) == 0.0
-    assert node.filter_steer_target(-8) == -16.0
-    assert node.steer_accumulator_deg == 0.0
+    assert node.calculate_steer_pwm(0.05) == 150
 
 
-def test_large_steer_is_added_to_pending_accumulation_then_resets():
-    node = make_steer_filter_node()
+def test_negative_error_commands_left_pwm():
+    node = make_closed_loop_node()
+    node.target_steer_angle_deg = -45.0
+    node.steer_angle_deg = 45.0
 
-    assert node.filter_steer_target(10) == 0.0
-    assert node.filter_steer_target(20) == 30.0
-    assert node.steer_accumulator_deg == 0.0
+    assert node.calculate_steer_pwm(0.05) == -150
+
+
+def test_pwm_stops_inside_angle_tolerance():
+    node = make_closed_loop_node()
+    node.target_steer_angle_deg = 10.0
+    node.steer_angle_deg = 9.5
+
+    assert node.calculate_steer_pwm(0.05) == 0
+
+
+def test_pid_reduces_pwm_near_target():
+    node = make_closed_loop_node()
+    node.target_steer_angle_deg = 10.0
+    node.steer_angle_deg = 0.0
+
+    assert node.calculate_steer_pwm(0.05) == 40
+
+
+def test_pid_integral_is_bounded_during_saturation():
+    node = make_closed_loop_node()
+    node.target_steer_angle_deg = 45.0
+    node.steer_angle_deg = -45.0
+
+    for _ in range(100):
+        assert node.calculate_steer_pwm(0.05) == 150
+
+    assert node.pid_integral_error == 0.0

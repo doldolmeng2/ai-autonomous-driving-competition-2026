@@ -104,8 +104,8 @@ MAX_WINDOW_START_JUMP_PX = 180
 # (bag/카메라 토픽만 켜져 있으면, 이 노드 실행만으로 인식 화면이 뜬다.)
 # 실차 대회 주행 시에는 CPU 절약을 위해 False로 끄는 것을 권장.
 DEBUG_VIEW = True
-WINDOW_NAME = 'timed_lane_offset_debug'
-WHITE_MASK_WINDOW_NAME = 'timed_lane_offset_white_mask_osy'
+WINDOW_NAME = 'mission_lane_offset_debug'
+WHITE_MASK_WINDOW_NAME = 'mission_lane_offset_white_mask'
 DEBUG_IMAGE_TOPIC = '/lane_offset/debug_image'
 
 
