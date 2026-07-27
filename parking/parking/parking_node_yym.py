@@ -3,14 +3,20 @@
 Scan convention used by this vehicle:
     rear=0 deg, right=+90 deg, front=+/-180 deg, left=-90 deg.
 
-The controller approaches at an explicit 0-degree steering target and, when
-the first parked vehicle is confirmed, performs a calibrated left turn. LiDAR
+The controller holds still for a configurable startup delay, then approaches
+at an explicit 0-degree steering target and, when the first parked vehicle is
+confirmed, performs a calibrated left turn. LiDAR
 then confirms that both parked vehicles are visible and performs one-second
-LiDAR midpoint corrections while reversing. Distinct vehicles reaching the
-LiDAR -90/+90-degree side gates arms the completion check, but does not change
-the one-second correction mode. When both side rays later change from the
-nearby parked vehicles to far background returns, the vehicle stops, drives
-forward, turns right, and continues straight.
+midpoint-angle corrections while reversing. Once either parked vehicle enters
+the 1 m ring, the controller stops for five seconds. Its first final segment
+chooses either the red/green line error or the two vehicles' mean tilt for
+0.5 seconds, stops and independently repeats that decision for a second
+0.5-second segment, then reverses continuously only after stopping and
+centering the steering at zero.
+Parking completes when either original parked vehicle, not a later pillar or
+unit, disappears below the rear-mounted LiDAR's horizontal x=0 line.
+After a two-second parked hold, the controller executes the timed exit
+sequence and finishes stopped with centered steering.
 """
 
 from __future__ import annotations
@@ -33,6 +39,7 @@ from std_msgs.msg import Int16MultiArray
 
 class ParkingState(str, Enum):
     WAIT_FOR_SCAN = 'WAIT_FOR_SCAN'
+    START_DELAY = 'START_DELAY'
     APPROACH_FIRST_CAR = 'APPROACH_FIRST_CAR'
     SET_LEFT_STEER = 'SET_LEFT_STEER'
     TURN_LEFT_TIMED = 'TURN_LEFT_TIMED'
@@ -40,6 +47,12 @@ class ParkingState(str, Enum):
     SETTLE_AND_ACQUIRE_GAP = 'SETTLE_AND_ACQUIRE_GAP'
     REVERSE_CENTER = 'REVERSE_CENTER'
     PARKED = 'PARKED'
+    EXIT_FORWARD = 'EXIT_FORWARD'
+    EXIT_SET_RIGHT_STEER = 'EXIT_SET_RIGHT_STEER'
+    EXIT_RIGHT_TURN = 'EXIT_RIGHT_TURN'
+    EXIT_CENTER_STEER = 'EXIT_CENTER_STEER'
+    EXIT_FINAL_FORWARD = 'EXIT_FINAL_FORWARD'
+    EXIT_COMPLETE = 'EXIT_COMPLETE'
     PARKING_FAILED = 'PARKING_FAILED'
     EMERGENCY_STOP = 'EMERGENCY_STOP'
 
@@ -47,6 +60,7 @@ class ParkingState(str, Enum):
 class ParkingMode(str, Enum):
     RECOGNITION = 'RECOGNITION'
     PARKING = 'PARKING'
+    EXIT = 'EXIT'
 
 
 @dataclass
@@ -79,6 +93,7 @@ class LidarObservation:
     right_vehicles: list[VehicleCluster]
     pair: Optional[ParkingPair]
     rear_min_distance: Optional[float]
+    pair_is_fallback: bool = False
 
 
 class ParkingNodeYym(Node):
@@ -93,6 +108,7 @@ class ParkingNodeYym(Node):
         self.declare_parameter('scan_timeout_sec', 0.5)
         self.declare_parameter('scan_quality_min_points', 10)
         self.declare_parameter('invalid_scan_confirm_frames', 5)
+        self.declare_parameter('startup_delay_sec', 5.0)
         # start_mode=recognition runs the normal complete sequence.
         # start_mode=parking skips recognition for debugging from an already
         # stationary pose after the timed left turn. recognition_only latches
@@ -114,8 +130,14 @@ class ParkingNodeYym(Node):
         self.declare_parameter('cluster_min_points', 7)
         self.declare_parameter('obstacle_min_extent_m', 0.22)
         self.declare_parameter('right_detection_margin_m', 0.12)
+        # Before the 1 m/five-second latch, only clusters on or below the
+        # green horizontal x=0 line can represent the two parked vehicles.
+        self.declare_parameter('pre_final_vehicle_max_x_m', 0.0)
 
         self.declare_parameter('first_car_confirm_frames', 3)
+        # Recognition only: distant wall/noise clusters must not trigger the
+        # timed left turn. Parking-mode clustering keeps its full 4 m range.
+        self.declare_parameter('first_car_max_distance_m', 2.0)
         self.declare_parameter('gap_confirm_frames', 3)
         self.declare_parameter('gap_min_width_m', 0.48)
         self.declare_parameter('gap_max_width_m', 1.40)
@@ -126,9 +148,8 @@ class ParkingNodeYym(Node):
         self.declare_parameter('turn_speed', 110)
         self.declare_parameter('reverse_speed', -110)
         self.declare_parameter('left_max_steer_deg', -45)
-        # Seeing distinct vehicles at both +/-90-degree LiDAR gates arms the
-        # completion check. The regular one-second midpoint correction cycle
-        # continues unchanged until both raw side windows see far background.
+        # Legacy +/-90-degree parameters remain available only for visual
+        # diagnostics. They do not control the simplified parking sequence.
         self.declare_parameter('lidar_side_gate_half_width_deg', 15.0)
         self.declare_parameter('lidar_side_gate_min_points', 3)
         self.declare_parameter('lidar_side_gate_confirm_frames', 3)
@@ -136,15 +157,19 @@ class ParkingNodeYym(Node):
         self.declare_parameter('lidar_side_far_half_width_deg', 5.0)
         self.declare_parameter('lidar_side_far_confirm_frames', 3)
         self.declare_parameter('lidar_side_far_stop_sec', 4.0)
+        self.declare_parameter('exit_wait_after_park_sec', 2.0)
         self.declare_parameter('exit_forward_duration_sec', 3.0)
         self.declare_parameter('exit_right_turn_duration_sec', 8.0)
+        self.declare_parameter('exit_final_forward_duration_sec', 10.0)
         self.declare_parameter('exit_right_steer_deg', 45)
         self.declare_parameter('exit_speed', 110)
-        # No parking-specific steering cap: calculated reverse steering may
-        # use the vehicle's full physical command range of +/-45 degrees.
-        # Multiply every LiDAR-calculated reverse angle by this gain before
-        # publishing it through /motor_control.
-        self.declare_parameter('reverse_steer_multiplier', 10)
+        # Real-vehicle testing showed the raw geometric angle was too weak.
+        self.declare_parameter('reverse_steer_multiplier', 10.0)
+        # Use gentler corrections after the 1 m trigger and five-second stop.
+        self.declare_parameter('final_reverse_steer_multiplier', 5.0)
+        self.declare_parameter('final_line_alignment_tolerance_deg', 5.0)
+        self.declare_parameter('final_correction_duration_sec', 0.5)
+        self.declare_parameter('final_correction_segment_count', 2)
         self.declare_parameter('steer_settle_sec', 0.6)
         # Recognition test: after steering settles at -45 degrees, drive for
         # this calibrated duration with maximum left steering, then stop.
@@ -161,6 +186,12 @@ class ParkingNodeYym(Node):
         self.declare_parameter('reverse_segment_duration_sec', 1.0)
         self.declare_parameter('reverse_measure_stop_sec', 0.4)
         self.declare_parameter('vehicle_pair_track_max_jump_m', 1.25)
+        # Retained for compatibility with older launch parameter files and
+        # the unused single-vehicle fallback helper. The tighter tracker
+        # prevents a pillar/next unit from replacing an original vehicle.
+        self.declare_parameter('final_center_gain', 1.0)
+        self.declare_parameter('final_alignment_gain', 1.0)
+        self.declare_parameter('final_vehicle_track_max_jump_m', 0.25)
         # Green horizontal line is x=0 at the rear-mounted LiDAR. Stop with
         # centered steering on the first scan with no valid points below it,
         # then confirm while stationary to reject a one-frame dropout.
@@ -189,6 +220,9 @@ class ParkingNodeYym(Node):
         self.scan_quality_min_points = int(self._value('scan_quality_min_points'))
         self.invalid_scan_confirm_frames = int(
             self._value('invalid_scan_confirm_frames')
+        )
+        self.startup_delay = max(
+            0.0, float(self._value('startup_delay_sec'))
         )
         requested_start_mode = str(self._value('start_mode')).strip().lower()
         if requested_start_mode not in ('recognition', 'parking'):
@@ -230,9 +264,16 @@ class ParkingNodeYym(Node):
         self.right_detection_margin = max(
             0.0, float(self._value('right_detection_margin_m'))
         )
+        self.pre_final_vehicle_max_x = float(
+            self._value('pre_final_vehicle_max_x_m')
+        )
 
         self.first_car_confirm_frames = max(
             1, int(self._value('first_car_confirm_frames'))
+        )
+        self.first_car_max_distance = max(
+            self.parking_min_range,
+            float(self._value('first_car_max_distance_m')),
         )
         self.gap_confirm_frames = max(1, int(self._value('gap_confirm_frames')))
         self.gap_min_width = float(self._value('gap_min_width_m'))
@@ -266,11 +307,17 @@ class ParkingNodeYym(Node):
         self.lidar_side_far_stop = max(
             0.0, float(self._value('lidar_side_far_stop_sec'))
         )
+        self.exit_wait_after_park = max(
+            0.0, float(self._value('exit_wait_after_park_sec'))
+        )
         self.exit_forward_duration = max(
             0.0, float(self._value('exit_forward_duration_sec'))
         )
         self.exit_right_turn_duration = max(
             0.0, float(self._value('exit_right_turn_duration_sec'))
+        )
+        self.exit_final_forward_duration = max(
+            0.0, float(self._value('exit_final_forward_duration_sec'))
         )
         self.exit_right_steer = abs(
             int(self._value('exit_right_steer_deg'))
@@ -278,6 +325,19 @@ class ParkingNodeYym(Node):
         self.exit_speed = abs(int(self._value('exit_speed')))
         self.reverse_steer_multiplier = max(
             0.0, float(self._value('reverse_steer_multiplier'))
+        )
+        self.final_reverse_steer_multiplier = max(
+            0.0, float(self._value('final_reverse_steer_multiplier'))
+        )
+        self.final_line_alignment_tolerance = max(
+            0.0,
+            float(self._value('final_line_alignment_tolerance_deg')),
+        )
+        self.final_correction_duration = max(
+            0.1, float(self._value('final_correction_duration_sec'))
+        )
+        self.final_correction_segment_count = max(
+            1, int(self._value('final_correction_segment_count'))
         )
         self.steer_settle_sec = float(self._value('steer_settle_sec'))
         self.left_turn_duration_sec = max(
@@ -301,6 +361,15 @@ class ParkingNodeYym(Node):
         )
         self.vehicle_pair_track_max_jump = max(
             0.1, float(self._value('vehicle_pair_track_max_jump_m'))
+        )
+        self.final_center_gain = max(
+            0.0, float(self._value('final_center_gain'))
+        )
+        self.final_alignment_gain = max(
+            0.0, float(self._value('final_alignment_gain'))
+        )
+        self.final_vehicle_track_max_jump = max(
+            0.05, float(self._value('final_vehicle_track_max_jump_m'))
         )
         self.rear_half_stop_margin = max(
             0.0, float(self._value('rear_half_stop_margin_m'))
@@ -333,6 +402,7 @@ class ParkingNodeYym(Node):
         )
 
         now = time.monotonic()
+        self.startup_delay_deadline = now + self.startup_delay
         self.mode = self.start_mode
         self.state = ParkingState.WAIT_FOR_SCAN
         self.state_started_at = now
@@ -353,12 +423,23 @@ class ParkingNodeYym(Node):
         self.reverse_phase = 'IDLE'
         self.reverse_segment_steer = 0
         self.reverse_segment_index = 0
+        self.final_correction_count = 0
         self.reverse_segment_drive_duration = self.reverse_segment_duration
         self.lower_vehicle_track_center: Optional[np.ndarray] = None
         self.upper_vehicle_track_center: Optional[np.ndarray] = None
         self.rear_half_lidar_point_count = 0
         self.rear_half_empty_frames = 0
         self.rear_half_points_seen = False
+        self.reference_lower_below_count = 0
+        self.reference_upper_below_count = 0
+        self.reference_lower_missing_frames = 0
+        self.reference_upper_missing_frames = 0
+        self.reference_lower_gone = False
+        self.reference_upper_gone = False
+        self.final_completion_tracking_started = False
+        self.current_reference_lower: Optional[VehicleCluster] = None
+        self.current_reference_upper: Optional[VehicleCluster] = None
+        self.final_target_half_gap = self.gap_min_width / 2.0
         self.straight_reverse_latched = False
         self.straight_reverse_started = False
         self.straight_reverse_trigger_distance = math.inf
@@ -379,12 +460,28 @@ class ParkingNodeYym(Node):
             self.create_timer(1.0 / self.debug_hz, self.draw_debug)
 
         self.get_logger().info(
-            'parking_node_yym: straight approach -> first-car trigger -> '
+            f'parking_node_yym: startup stop {self.startup_delay:.1f}s '
+            '-> straight approach -> first-car trigger -> '
+            f'first-car range<={self.first_car_max_distance:.2f}m -> '
             f'{self.left_turn_duration_sec:.2f}s max-left timed turn '
-            '-> repeated 1s LiDAR reverse corrections '
-            '-> +/-90deg side gate armed -> both sides far stop; '
-            f'far stop={self.lidar_side_far_distance:.2f}m/'
-            f'{self.lidar_side_far_confirm_frames} frames, '
+            f'-> pre-final vehicle x<={self.pre_final_vehicle_max_x:.2f}m '
+            'rear-half filter '
+            '-> strict gap pair or two-cluster fallback midpoint '
+            '-> repeated 1s midpoint-angle reverse corrections '
+            f'-> {self.straight_reverse_radius:.2f}m ring stop for '
+            f'{self.straight_reverse_stop:.1f}s '
+            f'-> {self.final_correction_segment_count} x '
+            f'{self.final_correction_duration:.1f}s '
+            f'conditional corrections (line tolerance +/-'
+            f'{self.final_line_alignment_tolerance:.1f}deg) '
+            '-> mandatory stop + steer=0 settle '
+            '-> steer=0 continuous reverse '
+            '-> either original vehicle clears line -> PARKED '
+            f'-> wait {self.exit_wait_after_park:.1f}s '
+            f'-> forward {self.exit_forward_duration:.1f}s '
+            f'-> max-right {self.exit_right_turn_duration:.1f}s '
+            f'-> forward {self.exit_final_forward_duration:.1f}s '
+            '-> EXIT_COMPLETE; '
             f'start_mode={self.start_mode.value}, '
             f'recognition_only={self.recognition_only}'
         )
@@ -408,34 +505,26 @@ class ParkingNodeYym(Node):
             return
 
         self.invalid_scan_count = 0
-        (
-            self.lidar_raw_left_m,
-            self.lidar_raw_right_m,
-        ) = self.lidar_raw_side_distances(msg)
         if (
-            self.state == ParkingState.REVERSE_CENTER
-            and self.lidar_side_gate_seen
-            and self.reverse_phase in (
-                'STEER_SETTLE',
-                'DRIVE',
-                'MEASURE_STOP',
-            )
+            self.state == ParkingState.SETTLE_AND_ACQUIRE_GAP
+            and observation.pair is None
         ):
-            if (
-                self.lidar_raw_left_m is not None
-                and self.lidar_raw_right_m is not None
-                and self.lidar_raw_left_m >= self.lidar_side_far_distance
-                and self.lidar_raw_right_m >= self.lidar_side_far_distance
-            ):
-                self.lidar_side_far_frames += 1
-            else:
-                self.lidar_side_far_frames = 0
-        else:
-            self.lidar_side_far_frames = 0
-
+            fallback_pair = self.fallback_visible_pair(
+                observation.vehicles
+            )
+            if fallback_pair is not None:
+                observation.pair = fallback_pair
+                observation.pair_is_fallback = True
         if self.state == ParkingState.REVERSE_CENTER:
-            tracked_pair = self.track_parking_pair(observation.vehicles)
-            if tracked_pair is None:
+            tracked_pair = self.track_parking_pair(
+                observation.vehicles,
+                max_jump=(
+                    self.final_vehicle_track_max_jump
+                    if self.straight_reverse_latched
+                    else self.vehicle_pair_track_max_jump
+                ),
+            )
+            if tracked_pair is None and not self.straight_reverse_latched:
                 tracked_pair = self.fallback_visible_pair(
                     observation.vehicles
                 )
@@ -445,33 +534,23 @@ class ParkingNodeYym(Node):
         if observation.pair is not None:
             self.last_pair_at = now
         if self.state == ParkingState.REVERSE_CENTER:
-            side_distances = self.lidar_side_vehicle_distances(
-                observation.vehicles
-            )
-            if side_distances is None:
-                self.lidar_side_left_m = None
-                self.lidar_side_right_m = None
-                if self.reverse_phase in (
-                    'STEER_SETTLE',
-                    'DRIVE',
-                    'MEASURE_STOP',
-                ):
-                    self.lidar_side_gate_frames = 0
-            else:
-                (
-                    self.lidar_side_left_m,
-                    self.lidar_side_right_m,
-                ) = side_distances
-                if self.reverse_phase in (
-                    'STEER_SETTLE',
-                    'DRIVE',
-                    'MEASURE_STOP',
-                ):
-                    self.lidar_side_gate_frames += 1
+            self.update_rear_half_stop_observation(observation)
+            self.update_straight_reverse_condition(observation.vehicles)
+            if self.final_completion_tracking_started:
+                self.update_reference_vehicle_completion(
+                    observation.vehicles,
+                    observation.pair,
+                )
         if self.state == ParkingState.APPROACH_FIRST_CAR:
+            close_right_vehicles = [
+                vehicle
+                for vehicle in observation.right_vehicles
+                if self.vehicle_nearest_distance(vehicle)
+                <= self.first_car_max_distance
+            ]
             self.first_car_frames = (
                 self.first_car_frames + 1
-                if observation.right_vehicles else 0
+                if close_right_vehicles else 0
             )
         else:
             self.first_car_frames = 0
@@ -587,11 +666,121 @@ class ParkingNodeYym(Node):
         ):
             self.rear_half_empty_frames += 1
 
+    def match_reference_vehicle(
+        self,
+        vehicles: list[VehicleCluster],
+        target_center: Optional[np.ndarray],
+        excluded: Optional[VehicleCluster] = None,
+    ) -> Optional[VehicleCluster]:
+        """Match one original parked vehicle without adopting a distant unit."""
+        if target_center is None:
+            return None
+        candidates = [
+            (
+                float(np.linalg.norm(vehicle.center - target_center)),
+                vehicle,
+            )
+            for vehicle in vehicles
+            if vehicle is not excluded
+        ]
+        if not candidates:
+            return None
+        distance, vehicle = min(candidates, key=lambda item: item[0])
+        if distance > self.final_vehicle_track_max_jump:
+            return None
+        return vehicle
+
+    def update_reference_vehicle_completion(
+        self,
+        vehicles: list[VehicleCluster],
+        pair: Optional[ParkingPair],
+    ) -> None:
+        """Latch each original vehicle gone once its below-line points vanish."""
+        if pair is not None:
+            lower_vehicle = pair.lower
+            upper_vehicle = pair.upper
+        else:
+            lower_vehicle = self.match_reference_vehicle(
+                vehicles, self.lower_vehicle_track_center
+            )
+            upper_vehicle = self.match_reference_vehicle(
+                vehicles,
+                self.upper_vehicle_track_center,
+                excluded=lower_vehicle,
+            )
+
+        self.current_reference_lower = (
+            None if self.reference_lower_gone else lower_vehicle
+        )
+        self.current_reference_upper = (
+            None if self.reference_upper_gone else upper_vehicle
+        )
+        if lower_vehicle is not None:
+            self.lower_vehicle_track_center = lower_vehicle.center.copy()
+        if upper_vehicle is not None:
+            self.upper_vehicle_track_center = upper_vehicle.center.copy()
+
+        self.reference_lower_below_count = (
+            0
+            if lower_vehicle is None
+            else int(np.count_nonzero(
+                lower_vehicle.points[:, 0] < -self.rear_half_stop_margin
+            ))
+        )
+        self.reference_upper_below_count = (
+            0
+            if upper_vehicle is None
+            else int(np.count_nonzero(
+                upper_vehicle.points[:, 0] < -self.rear_half_stop_margin
+            ))
+        )
+
+        if not self.reference_lower_gone:
+            if self.reference_lower_below_count > 0:
+                self.reference_lower_missing_frames = 0
+            else:
+                self.reference_lower_missing_frames += 1
+                if (
+                    self.reference_lower_missing_frames
+                    >= self.rear_half_empty_confirm_frames
+                ):
+                    self.reference_lower_gone = True
+                    self.get_logger().info(
+                        'Reference lower/right vehicle cleared the green '
+                        'horizontal line; later objects on that side ignored'
+                    )
+
+        if not self.reference_upper_gone:
+            if self.reference_upper_below_count > 0:
+                self.reference_upper_missing_frames = 0
+            else:
+                self.reference_upper_missing_frames += 1
+                if (
+                    self.reference_upper_missing_frames
+                    >= self.rear_half_empty_confirm_frames
+                ):
+                    self.reference_upper_gone = True
+                    self.get_logger().info(
+                        'Reference upper/left vehicle cleared the green '
+                        'horizontal line; later objects on that side ignored'
+                    )
+        if self.reference_lower_gone:
+            self.current_reference_lower = None
+        if self.reference_upper_gone:
+            self.current_reference_upper = None
+
     def update_straight_reverse_condition(
         self, vehicles: list[VehicleCluster]
     ) -> None:
         """Latch when any obstacle-vehicle point enters the second ring."""
-        if self.straight_reverse_latched:
+        if (
+            self.straight_reverse_latched
+            or self.reverse_phase not in (
+                'STEER_SETTLE',
+                'DRIVE',
+                'MEASURE_STOP',
+            )
+        ):
             return
         if not vehicles:
             self.straight_reverse_trigger_distance = math.inf
@@ -607,12 +796,19 @@ class ParkingNodeYym(Node):
         ):
             self.straight_reverse_latched = True
             self.straight_reverse_started = False
-            self.reverse_phase = 'STRAIGHT_CENTER'
+            self.final_correction_count = 0
+            if self.observation.pair is not None:
+                self.final_target_half_gap = max(
+                    self.vehicle_width / 2.0,
+                    self.observation.pair.gap_width / 2.0,
+                )
+            self.reverse_phase = 'FINAL_STOP'
             self.reverse_phase_started_at = time.monotonic()
             self.get_logger().info(
-                'Straight reverse locked: an obstacle point entered '
+                'Final correction latched: a parked-vehicle point entered '
                 f'the {self.straight_reverse_radius:.2f}m ring; stopping for '
-                f'{self.straight_reverse_stop:.1f}s'
+                f'{self.straight_reverse_stop:.1f}s with steer=0 before '
+                'final two-vehicle corrections.'
             )
 
     def observe(self, msg: LaserScan) -> LidarObservation:
@@ -652,9 +848,17 @@ class ParkingNodeYym(Node):
             np.asarray(points, dtype=np.float64)
             if points else np.empty((0, 2), dtype=np.float64)
         )
+        vehicle_point_array = point_array
+        if (
+            self.mode == ParkingMode.PARKING
+            and not self.straight_reverse_latched
+        ):
+            vehicle_point_array = point_array[
+                point_array[:, 0] <= self.pre_final_vehicle_max_x
+            ]
         vehicles = [
             self.make_vehicle_cluster(component)
-            for component in self.connected_components(point_array)
+            for component in self.connected_components(vehicle_point_array)
         ]
         vehicles = [
             vehicle for vehicle in vehicles
@@ -787,7 +991,10 @@ class ParkingNodeYym(Node):
         )
 
     def track_parking_pair(
-        self, vehicles: list[VehicleCluster]
+        self,
+        vehicles: list[VehicleCluster],
+        *,
+        max_jump: Optional[float] = None,
     ) -> Optional[ParkingPair]:
         """Keep both original vehicles even when the strict gap test fails."""
         if (
@@ -797,6 +1004,11 @@ class ParkingNodeYym(Node):
         ):
             return None
 
+        allowed_jump = (
+            self.vehicle_pair_track_max_jump
+            if max_jump is None
+            else max_jump
+        )
         best = None
         for lower_index, lower in enumerate(vehicles):
             for upper_index, upper in enumerate(vehicles):
@@ -809,8 +1021,8 @@ class ParkingNodeYym(Node):
                     upper.center - self.upper_vehicle_track_center
                 ))
                 if (
-                    lower_jump > self.vehicle_pair_track_max_jump
-                    or upper_jump > self.vehicle_pair_track_max_jump
+                    lower_jump > allowed_jump
+                    or upper_jump > allowed_jump
                 ):
                     continue
                 cost = lower_jump + upper_jump
@@ -822,7 +1034,17 @@ class ParkingNodeYym(Node):
         pair = self.build_parking_pair(
             best[1], best[2], require_valid_gap=False
         )
-        if pair is None:
+        if self.final_completion_tracking_started:
+            pair_text = (
+                f'original L/R below='
+                f'{self.reference_upper_below_count}/'
+                f'{self.reference_lower_below_count} '
+                f'missing={self.reference_upper_missing_frames}/'
+                f'{self.reference_lower_missing_frames} '
+                f'gone={int(self.reference_upper_gone)}/'
+                f'{int(self.reference_lower_gone)}'
+            )
+        elif pair is None:
             return None
         self.lower_vehicle_track_center = pair.lower.center.copy()
         self.upper_vehicle_track_center = pair.upper.center.copy()
@@ -896,8 +1118,27 @@ class ParkingNodeYym(Node):
                 self.rear_half_lidar_point_count > 0
             )
             self.rear_half_empty_frames = 0
+            self.reference_lower_below_count = 0
+            self.reference_upper_below_count = 0
+            self.reference_lower_missing_frames = 0
+            self.reference_upper_missing_frames = 0
+            self.reference_lower_gone = False
+            self.reference_upper_gone = False
+            self.final_completion_tracking_started = False
+            self.current_reference_lower = (
+                pair.lower if pair is not None else None
+            )
+            self.current_reference_upper = (
+                pair.upper if pair is not None else None
+            )
+            self.final_target_half_gap = (
+                max(self.vehicle_width / 2.0, pair.gap_width / 2.0)
+                if pair is not None
+                else self.gap_min_width / 2.0
+            )
             self.straight_reverse_latched = False
             self.straight_reverse_started = False
+            self.final_correction_count = 0
             self.straight_reverse_trigger_distance = math.inf
             self.lidar_side_gate_frames = 0
             self.lidar_side_left_m = None
@@ -934,7 +1175,7 @@ class ParkingNodeYym(Node):
     def control_tick(self) -> None:
         now = time.monotonic()
         if self.state in (
-            ParkingState.PARKED,
+            ParkingState.EXIT_COMPLETE,
             ParkingState.PARKING_FAILED,
             ParkingState.EMERGENCY_STOP,
         ):
@@ -965,12 +1206,25 @@ class ParkingNodeYym(Node):
             return
 
         if self.state == ParkingState.WAIT_FOR_SCAN:
-            if self.mode == ParkingMode.PARKING:
-                self.transition(
-                    ParkingState.SETTLE_AND_ACQUIRE_GAP, now
+            self.transition(ParkingState.START_DELAY, now)
+            self.publish_control(0, 0)
+            return
+
+        if self.state == ParkingState.START_DELAY:
+            remaining = max(0.0, self.startup_delay_deadline - now)
+            self.reverse_phase = f'START_DELAY_{remaining:.1f}s'
+            self.publish_control(0, 0)
+            if remaining <= 0.0:
+                if self.mode == ParkingMode.PARKING:
+                    self.transition(
+                        ParkingState.SETTLE_AND_ACQUIRE_GAP, now
+                    )
+                else:
+                    self.transition(ParkingState.APPROACH_FIRST_CAR, now)
+                self.get_logger().info(
+                    'Startup delay complete: beginning driving sequence'
                 )
-            else:
-                self.transition(ParkingState.APPROACH_FIRST_CAR, now)
+            return
 
         elapsed = now - self.state_started_at
         if self.state == ParkingState.APPROACH_FIRST_CAR:
@@ -1033,13 +1287,21 @@ class ParkingNodeYym(Node):
                 required_width = (
                     self.vehicle_width + 2.0 * self.minimum_side_clearance
                 )
-                if pair.gap_width < required_width:
+                if (
+                    not self.observation.pair_is_fallback
+                    and pair.gap_width < required_width
+                ):
                     self.fail(
                         f'gap too narrow: {pair.gap_width:.2f} m '
                         f'< {required_width:.2f} m',
                         now,
                     )
                     return
+                if self.observation.pair_is_fallback:
+                    self.get_logger().warning(
+                        'Starting reverse with two-cluster fallback midpoint; '
+                        'strict gap pair remains preferred when available'
+                    )
                 self.transition(ParkingState.REVERSE_CENTER, now)
             self.publish_control(0, 0)
             return
@@ -1058,8 +1320,7 @@ class ParkingNodeYym(Node):
                 'MEASURE_STOP',
             )
             if (
-                self.reverse_phase
-                in lidar_reverse_phases + ('LIDAR_SIDE_REVERSE',)
+                self.reverse_phase in lidar_reverse_phases
                 and self.observation.rear_min_distance is not None
                 and self.observation.rear_min_distance
                 <= self.rear_hard_stop_distance
@@ -1067,46 +1328,178 @@ class ParkingNodeYym(Node):
                 self.fail('rear obstacle inside hard-stop distance', now)
                 return
 
-            if (
-                self.reverse_phase in lidar_reverse_phases
-                and self.lidar_side_gate_seen
-                and self.lidar_side_far_frames
-                >= self.lidar_side_far_confirm_frames
-            ):
-                self.reverse_phase = 'SIDE_FAR_STOP'
-                self.reverse_phase_started_at = now
+            phase_elapsed = (
+                0.0
+                if self.reverse_phase_started_at is None
+                else now - self.reverse_phase_started_at
+            )
+            if self.reverse_phase == 'FINAL_STOP':
                 self.publish_control(0, 0)
+                if phase_elapsed >= self.straight_reverse_stop:
+                    self.reverse_phase = 'FINAL_MEASURE_STOP'
+                    self.reverse_phase_started_at = now
+                    self.straight_reverse_started = True
+                    self.reverse_segment_index = 0
+                    self.final_correction_count = 0
+                    self.final_completion_tracking_started = True
+                    self.reference_lower_missing_frames = 0
+                    self.reference_upper_missing_frames = 0
+                    self.reference_lower_gone = False
+                    self.reference_upper_gone = False
+                    self.get_logger().info(
+                        'Five-second stop complete: starting '
+                        f'{self.final_correction_segment_count} x '
+                        f'{self.final_correction_duration:.1f}s corrections '
+                        'using line angle when misaligned or average parked-'
+                        'vehicle tilt when aligned'
+                    )
+                return
+
+            final_reverse_phases = (
+                'FINAL_STEER_SETTLE',
+                'FINAL_DRIVE',
+                'FINAL_MEASURE_STOP',
+                'FINAL_ZERO_STEER_SETTLE',
+                'FINAL_STRAIGHT_DRIVE',
+            )
+            if self.reverse_phase in final_reverse_phases:
+                if (
+                    self.reference_lower_gone
+                    or self.reference_upper_gone
+                ):
+                    self.transition(ParkingState.PARKED, now)
+                    self.reverse_phase = 'PARKED_HOLD'
+                    self.publish_control(0, 0)
+                    self.get_logger().info(
+                        'PARKED: an original parked vehicle cleared the green '
+                        'horizontal line; later pillars/units ignored'
+                    )
+                    return
+
+                if self.reverse_phase == 'FINAL_STRAIGHT_DRIVE':
+                    self.publish_control(0, self.reverse_speed)
+                    return
+
+                if self.reverse_phase == 'FINAL_ZERO_STEER_SETTLE':
+                    self.publish_control(0, 0)
+                    if phase_elapsed >= self.steer_settle_sec:
+                        self.reverse_phase = 'FINAL_STRAIGHT_DRIVE'
+                        self.reverse_phase_started_at = now
+                        self.publish_control(0, self.reverse_speed)
+                        self.get_logger().info(
+                            'Steering centered at zero while stopped: '
+                            'starting straight reverse'
+                        )
+                    return
+
+                pair = self.observation.pair
+                if (
+                    pair is None
+                    and self.current_reference_lower is not None
+                    and self.current_reference_upper is not None
+                ):
+                    pair = self.build_parking_pair(
+                        self.current_reference_lower,
+                        self.current_reference_upper,
+                        require_valid_gap=False,
+                    )
+                if pair is not None:
+                    red_line_angle = self.reverse_reference_angle(pair)
+                    lines_aligned = (
+                        abs(red_line_angle)
+                        <= self.final_line_alignment_tolerance
+                    )
+                    if lines_aligned:
+                        calculated_steer = (
+                            self.final_initial_alignment_steering(pair)
+                        )
+                        target_description = (
+                            f'lines aligned ({red_line_angle:+.1f}deg): '
+                            'average vehicle tilt='
+                            f'{self.final_average_alignment_angle(pair):+.1f}'
+                            f'deg x{self.final_reverse_steer_multiplier:.1f}'
+                        )
+                    else:
+                        calculated_steer = self.reverse_steering(pair)
+                        target_description = (
+                            f'lines misaligned ({red_line_angle:+.1f}deg): '
+                            f'line angle x{self.reverse_steer_multiplier:.1f}'
+                        )
+                    target_description += (
+                        f', axes='
+                        f'{math.degrees(pair.lower.axis_angle):+.0f}/'
+                        f'{math.degrees(pair.upper.axis_angle):+.0f}deg'
+                    )
+                else:
+                    self.reverse_phase = 'FINAL_MEASURE_STOP'
+                    self.reverse_phase_started_at = now
+                    self.publish_control(self.held_steering_command(), 0)
+                    return
+
+                if self.reverse_phase == 'FINAL_STEER_SETTLE':
+                    self.publish_control(self.reverse_segment_steer, 0)
+                    if phase_elapsed >= self.steer_settle_sec:
+                        self.reverse_phase = 'FINAL_DRIVE'
+                        self.reverse_segment_started_at = now
+                        self.get_logger().info(
+                            f'Final reverse segment '
+                            f'{self.reverse_segment_index}: '
+                            f'steer={self.reverse_segment_steer}deg for '
+                            f'{self.final_correction_duration:.1f}s'
+                        )
+                    return
+
+                if self.reverse_phase == 'FINAL_DRIVE':
+                    if (
+                        self.reverse_segment_started_at is not None
+                        and now - self.reverse_segment_started_at
+                        >= self.final_correction_duration
+                    ):
+                        if (
+                            self.final_correction_count
+                            >= self.final_correction_segment_count
+                        ):
+                            self.reverse_phase = 'FINAL_ZERO_STEER_SETTLE'
+                            self.reverse_phase_started_at = now
+                            self.publish_control(0, 0)
+                            self.get_logger().info(
+                                f'{self.final_correction_segment_count} tilt '
+                                'corrections complete: mandatory stop and '
+                                'steer=0 centering before straight reverse'
+                            )
+                            return
+                        self.reverse_phase = 'FINAL_MEASURE_STOP'
+                        self.reverse_phase_started_at = now
+                        self.publish_control(
+                            self.held_steering_command(), 0
+                        )
+                        return
+                    self.publish_control(
+                        self.reverse_segment_steer,
+                        self.reverse_speed,
+                    )
+                    return
+
+                self.publish_control(self.held_steering_command(), 0)
+                if phase_elapsed < self.reverse_measure_stop:
+                    return
+
+                self.reverse_segment_steer = calculated_steer
+                self.final_correction_count += 1
+                self.reverse_segment_index = self.final_correction_count
+                self.reverse_phase = 'FINAL_STEER_SETTLE'
+                self.reverse_phase_started_at = now
                 self.get_logger().info(
-                    'Both raw LiDAR -90/+90 ranges are far '
-                    f'(>={self.lidar_side_far_distance:.2f}m for '
-                    f'{self.lidar_side_far_frames} frames); '
-                    f'stopping for {self.lidar_side_far_stop:.1f}s'
+                    f'Final reverse segment '
+                    f'{self.final_correction_count}: '
+                    f'{target_description}, '
+                    f'steer={self.reverse_segment_steer}deg'
                 )
                 return
 
-            if (
-                self.reverse_phase in lidar_reverse_phases
-                and not self.lidar_side_gate_seen
-                and self.lidar_side_gate_frames
-                >= self.lidar_side_gate_confirm_frames
-            ):
-                self.lidar_side_gate_seen = True
-                self.lidar_side_far_frames = 0
-                self.get_logger().info(
-                    'Distinct parked vehicles confirmed at LiDAR '
-                    '-90/+90deg gates; completion check armed while '
-                    'continuing one-second reverse corrections'
-                )
-
             if self.reverse_phase in lidar_reverse_phases:
                 pair = self.observation.pair
-                single_vehicle = (
-                    self.observation.vehicles[0]
-                    if pair is None
-                    and len(self.observation.vehicles) == 1
-                    else None
-                )
-                if pair is None and single_vehicle is None:
+                if pair is None:
                     self.reverse_phase = 'MEASURE_STOP'
                     self.reverse_phase_started_at = now
                     self.publish_control(self.held_steering_command(), 0)
@@ -1159,20 +1552,11 @@ class ParkingNodeYym(Node):
                     return
 
                 self.reverse_segment_index += 1
-                if pair is not None:
-                    self.reverse_segment_steer = self.reverse_steering(pair)
-                    target_description = (
-                        f'reference=({pair.reference_point[0]:+.2f},'
-                        f'{pair.reference_point[1]:+.2f})m'
-                    )
-                else:
-                    self.reverse_segment_steer = (
-                        self.single_vehicle_steering(single_vehicle)
-                    )
-                    target_description = (
-                        'single-axis='
-                        f'{math.degrees(single_vehicle.axis_angle):+.1f}deg'
-                    )
+                self.reverse_segment_steer = self.reverse_steering(pair)
+                target_description = (
+                    f'reference=({pair.reference_point[0]:+.2f},'
+                    f'{pair.reference_point[1]:+.2f})m'
+                )
                 self.reverse_phase = 'STEER_SETTLE'
                 self.reverse_phase_started_at = now
                 self.get_logger().info(
@@ -1183,55 +1567,6 @@ class ParkingNodeYym(Node):
                 )
                 return
 
-            phase_elapsed = (
-                0.0
-                if self.reverse_phase_started_at is None
-                else now - self.reverse_phase_started_at
-            )
-            if self.reverse_phase == 'SIDE_FAR_STOP':
-                self.publish_control(0, 0)
-                if phase_elapsed >= self.lidar_side_far_stop:
-                    self.reverse_phase = 'EXIT_FORWARD'
-                    self.reverse_phase_started_at = now
-                    self.get_logger().info(
-                        f'Exit: straight forward for '
-                        f'{self.exit_forward_duration:.1f}s'
-                    )
-                return
-
-            if self.reverse_phase == 'EXIT_FORWARD':
-                if phase_elapsed >= self.exit_forward_duration:
-                    self.reverse_phase = 'EXIT_RIGHT_TURN'
-                    self.reverse_phase_started_at = now
-                    self.publish_control(
-                        self.exit_right_steer, self.exit_speed
-                    )
-                    self.get_logger().info(
-                        f'Exit: +{self.exit_right_steer}deg right turn for '
-                        f'{self.exit_right_turn_duration:.1f}s'
-                    )
-                    return
-                self.publish_control(0, self.exit_speed)
-                return
-
-            if self.reverse_phase == 'EXIT_RIGHT_TURN':
-                if phase_elapsed >= self.exit_right_turn_duration:
-                    self.reverse_phase = 'EXIT_STRAIGHT'
-                    self.reverse_phase_started_at = now
-                    self.get_logger().info(
-                        'Exit right turn complete; driving straight'
-                    )
-                self.publish_control(
-                    0 if self.reverse_phase == 'EXIT_STRAIGHT'
-                    else self.exit_right_steer,
-                    self.exit_speed,
-                )
-                return
-
-            if self.reverse_phase == 'EXIT_STRAIGHT':
-                self.publish_control(0, self.exit_speed)
-                return
-
             self.reverse_phase = 'MEASURE_STOP'
             self.reverse_phase_started_at = now
             self.lidar_side_far_frames = 0
@@ -1239,23 +1574,164 @@ class ParkingNodeYym(Node):
             return
 
         if self.state == ParkingState.PARKED:
-            # Finish with the front wheels centered as requested.
+            self.reverse_phase = 'PARKED_WAIT_EXIT'
             self.publish_control(0, 0)
-        else:
-            # Other safe states hold their current angle to avoid hunting.
-            self.publish_control(self.held_steering_command(), 0)
+            if elapsed >= self.exit_wait_after_park:
+                self.mode = ParkingMode.EXIT
+                self.transition(ParkingState.EXIT_FORWARD, now)
+                self.reverse_phase = 'EXIT_FORWARD'
+                self.publish_control(0, self.exit_speed)
+                self.get_logger().info(
+                    f'EXIT: starting {self.exit_forward_duration:.1f}s '
+                    'straight drive'
+                )
+            return
+
+        if self.state == ParkingState.EXIT_FORWARD:
+            self.reverse_phase = 'EXIT_FORWARD'
+            if elapsed >= self.exit_forward_duration:
+                self.transition(ParkingState.EXIT_SET_RIGHT_STEER, now)
+                self.reverse_phase = 'EXIT_SET_RIGHT_STEER'
+                self.publish_control(self.exit_right_steer, 0)
+                self.get_logger().info(
+                    'EXIT: first straight complete; stopped to set maximum '
+                    'right steering'
+                )
+                return
+            self.publish_control(0, self.exit_speed)
+            return
+
+        if self.state == ParkingState.EXIT_SET_RIGHT_STEER:
+            self.reverse_phase = 'EXIT_SET_RIGHT_STEER'
+            if elapsed >= self.steer_settle_sec:
+                self.transition(ParkingState.EXIT_RIGHT_TURN, now)
+                self.reverse_phase = 'EXIT_RIGHT_TURN'
+                self.publish_control(
+                    self.exit_right_steer, self.exit_speed
+                )
+                self.get_logger().info(
+                    f'EXIT: starting {self.exit_right_turn_duration:.1f}s '
+                    'maximum-right turn'
+                )
+                return
+            self.publish_control(self.exit_right_steer, 0)
+            return
+
+        if self.state == ParkingState.EXIT_RIGHT_TURN:
+            self.reverse_phase = 'EXIT_RIGHT_TURN'
+            if elapsed >= self.exit_right_turn_duration:
+                self.transition(ParkingState.EXIT_CENTER_STEER, now)
+                self.reverse_phase = 'EXIT_CENTER_STEER'
+                self.publish_control(0, 0)
+                self.get_logger().info(
+                    'EXIT: right turn complete; stopped to center steering'
+                )
+                return
+            self.publish_control(self.exit_right_steer, self.exit_speed)
+            return
+
+        if self.state == ParkingState.EXIT_CENTER_STEER:
+            self.reverse_phase = 'EXIT_CENTER_STEER'
+            if elapsed >= self.steer_settle_sec:
+                self.transition(ParkingState.EXIT_FINAL_FORWARD, now)
+                self.reverse_phase = 'EXIT_FINAL_FORWARD'
+                self.publish_control(0, self.exit_speed)
+                self.get_logger().info(
+                    f'EXIT: starting final '
+                    f'{self.exit_final_forward_duration:.1f}s straight drive'
+                )
+                return
+            self.publish_control(0, 0)
+            return
+
+        if self.state == ParkingState.EXIT_FINAL_FORWARD:
+            self.reverse_phase = 'EXIT_FINAL_FORWARD'
+            if elapsed >= self.exit_final_forward_duration:
+                self.transition(ParkingState.EXIT_COMPLETE, now)
+                self.reverse_phase = 'EXIT_COMPLETE_HOLD'
+                self.publish_control(0, 0)
+                self.get_logger().info(
+                    'EXIT COMPLETE: vehicle stopped with steering centered'
+                )
+                return
+            self.publish_control(0, self.exit_speed)
+            return
+
+        # Other safe states hold their current angle to avoid hunting.
+        self.publish_control(self.held_steering_command(), 0)
 
     def reverse_steering(self, pair: ParkingPair) -> int:
         """Return the red angle from the rear baseline to the reference point."""
+        return self.scaled_reverse_steering(
+            self.reverse_reference_angle(pair)
+        )
+
+    @staticmethod
+    def reverse_reference_angle(pair: ParkingPair) -> float:
+        """Return the unscaled red/green-line angular error in degrees."""
         reference_x = float(pair.reference_point[0])
         reference_y = float(pair.reference_point[1])
         # Rear baseline is -x. In the vehicle's LiDAR convention, a point to
         # the right has positive bearing and therefore commands right steer.
         rear_distance = max(0.05, -reference_x)
-        reference_angle = math.degrees(
+        return math.degrees(
             math.atan2(-reference_y, rear_distance)
         )
-        return self.scaled_reverse_steering(reference_angle)
+
+    @staticmethod
+    def final_average_alignment_angle(pair: ParkingPair) -> float:
+        """Return the mean tilt of the two parked vehicles in degrees."""
+        return math.degrees(
+            0.5 * (
+                float(pair.lower.axis_angle)
+                + float(pair.upper.axis_angle)
+            )
+        )
+
+    def final_initial_alignment_steering(
+        self, pair: ParkingPair
+    ) -> int:
+        """Scale only the two parked vehicles' mean tilt."""
+        return self.scaled_reverse_steering(
+            self.final_average_alignment_angle(pair),
+            multiplier=self.final_reverse_steer_multiplier,
+        )
+
+    def final_conditional_steering(self, pair: ParkingPair) -> int:
+        """Choose line correction unless red and green are already aligned."""
+        if (
+            abs(self.reverse_reference_angle(pair))
+            <= self.final_line_alignment_tolerance
+        ):
+            return self.final_initial_alignment_steering(pair)
+        return self.reverse_steering(pair)
+
+    def final_single_reference_steering(
+        self,
+        vehicle: VehicleCluster,
+        *,
+        is_lower: bool,
+    ) -> int:
+        """Continue after one original vehicle clears, without using a pillar."""
+        inferred_gap_center = (
+            float(vehicle.y_max) + self.final_target_half_gap
+            if is_lower
+            else float(vehicle.y_min) - self.final_target_half_gap
+        )
+        reference_depth = max(0.05, -float(vehicle.center[0]))
+        center_angle = math.degrees(math.atan2(
+            -inferred_gap_center,
+            reference_depth,
+        ))
+        alignment_angle = math.degrees(float(vehicle.axis_angle))
+        calculated_angle = (
+            self.final_center_gain * center_angle
+            + self.final_alignment_gain * alignment_angle
+        )
+        return self.scaled_reverse_steering(
+            calculated_angle,
+            multiplier=self.final_reverse_steer_multiplier,
+        )
 
     def single_vehicle_steering(self, vehicle: VehicleCluster) -> int:
         """Parallelize the ego with the only visible parked-vehicle line."""
@@ -1266,9 +1742,19 @@ class ParkingNodeYym(Node):
         # reversing, so it directly produces a positive (right) steer.
         return self.scaled_reverse_steering(axis_angle)
 
-    def scaled_reverse_steering(self, calculated_angle: float) -> int:
+    def scaled_reverse_steering(
+        self,
+        calculated_angle: float,
+        *,
+        multiplier: Optional[float] = None,
+    ) -> int:
         """Scale a LiDAR reverse angle and clamp it to the steering range."""
-        scaled_angle = calculated_angle * self.reverse_steer_multiplier
+        steer_multiplier = (
+            self.reverse_steer_multiplier
+            if multiplier is None
+            else multiplier
+        )
+        scaled_angle = calculated_angle * steer_multiplier
         return int(round(max(-45.0, min(45.0, scaled_angle))))
 
     @staticmethod
@@ -1390,11 +1876,26 @@ class ParkingNodeYym(Node):
         cv2.line(image, bumper_left, bumper_right, (255, 255, 255), 3)
 
         cv2.rectangle(image, (8, 8), (size - 8, 132), (55, 55, 55), -1)
+        if self.state in (
+            ParkingState.PARKED,
+            ParkingState.EXIT_COMPLETE,
+        ):
+            state_text = self.state.value
+            state_color = (0, 255, 0)
+        elif self.state in (
+            ParkingState.PARKING_FAILED,
+            ParkingState.EMERGENCY_STOP,
+        ):
+            state_text = 'FAILED'
+            state_color = (0, 0, 255)
+        else:
+            state_text = self.state.value
+            state_color = (0, 255, 255)
         cv2.putText(
             image,
-            f'MODE: {self.mode.value} | STATE: {self.state.value}',
+            f'MODE: {self.mode.value} | STATE: {state_text}',
             (18, 36),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.70, (0, 255, 255), 2,
+            cv2.FONT_HERSHEY_SIMPLEX, 0.70, state_color, 2,
             cv2.LINE_AA,
         )
         cv2.putText(
@@ -1406,12 +1907,8 @@ class ParkingNodeYym(Node):
         )
         if pair is None:
             if len(self.observation.vehicles) == 1:
-                single_vehicle = self.observation.vehicles[0]
                 pair_text = (
-                    f'single-axis='
-                    f'{math.degrees(single_vehicle.axis_angle):+.1f}deg '
-                    f'steer='
-                    f'{self.single_vehicle_steering(single_vehicle):+d}deg '
+                    'one vehicle visible: waiting for two-vehicle midpoint '
                     f'| segment={self.reverse_segment_index} '
                     f'rear-lidar={self.rear_half_lidar_point_count} '
                     f'empty={self.rear_half_empty_frames}/'
@@ -1427,13 +1924,27 @@ class ParkingNodeYym(Node):
                     f'{self.rear_half_empty_confirm_frames}'
                 )
         else:
+            displayed_steer = (
+                (
+                    0
+                    if self.reverse_phase in (
+                        'FINAL_ZERO_STEER_SETTLE',
+                        'FINAL_STRAIGHT_DRIVE',
+                    )
+                    else self.final_conditional_steering(pair)
+                )
+                if self.reverse_phase.startswith('FINAL_')
+                else self.reverse_steering(pair)
+            )
             pair_text = (
+                f'pair='
+                f'{"FALLBACK" if self.observation.pair_is_fallback else "STRICT"} '
                 f'seg={self.reverse_segment_index} '
                 f'gap={pair.gap_width:.2f}m center='
                 f'{pair.gap_center_y:+.2f}m L/R='
                 f'{pair.left_clearance:.2f}/'
                 f'{pair.right_clearance:.2f}m '
-                f'ref-angle={self.reverse_steering(pair):+d}deg '
+                f'ref-angle={displayed_steer:+d}deg '
                 f'rear-lidar={self.rear_half_lidar_point_count} '
                 f'empty={self.rear_half_empty_frames}/'
                 f'{self.rear_half_empty_confirm_frames}'
@@ -1460,64 +1971,56 @@ class ParkingNodeYym(Node):
                 'DRIVE',
                 'MEASURE_STOP',
             ):
-                lidar_raw_left_text = (
-                    f'{self.lidar_raw_left_m:.2f}'
-                    if self.lidar_raw_left_m is not None
-                    else '--'
+                guidance_text = (
+                    f'1s midpoint correction | nearest vehicle='
+                    f'{self.straight_reverse_trigger_distance:.2f}m '
+                    f'gate={self.straight_reverse_radius:.2f}m'
                 )
-                lidar_raw_right_text = (
-                    f'{self.lidar_raw_right_m:.2f}'
-                    if self.lidar_raw_right_m is not None
-                    else '--'
+            elif self.reverse_phase == 'FINAL_STOP':
+                remaining = max(
+                    0.0,
+                    self.straight_reverse_stop
+                    - (
+                        0.0
+                        if self.reverse_phase_started_at is None
+                        else time.monotonic()
+                        - self.reverse_phase_started_at
+                    ),
                 )
                 guidance_text = (
-                    f'LiDAR +/-90 gate='
-                    f'{self.lidar_side_gate_frames}/'
-                    f'{self.lidar_side_gate_confirm_frames} '
-                    f'armed={int(self.lidar_side_gate_seen)} '
-                    f'raw={lidar_raw_left_text}/{lidar_raw_right_text}m '
-                    f'far={self.lidar_side_far_frames}/'
-                    f'{self.lidar_side_far_confirm_frames} '
-                    f'window=+/-'
-                    f'{math.degrees(self.lidar_side_gate_half_width):.0f}deg'
+                    f'1m LATCHED | STOP + STEER 0 | '
+                    f'{remaining:.1f}s remaining'
                 )
-            else:
-                lidar_left_text = (
-                    f'{self.lidar_side_left_m:.2f}'
-                    if self.lidar_side_left_m is not None
-                    else '--'
-                )
-                lidar_right_text = (
-                    f'{self.lidar_side_right_m:.2f}'
-                    if self.lidar_side_right_m is not None
-                    else '--'
-                )
-                lidar_difference_text = (
-                    f'{abs(self.lidar_side_left_m - self.lidar_side_right_m):.2f}'
-                    if (
-                        self.lidar_side_left_m is not None
-                        and self.lidar_side_right_m is not None
+            elif self.reverse_phase in (
+                'FINAL_STEER_SETTLE',
+                'FINAL_DRIVE',
+                'FINAL_MEASURE_STOP',
+                'FINAL_ZERO_STEER_SETTLE',
+                'FINAL_STRAIGHT_DRIVE',
+                'PARKED_HOLD',
+            ):
+                if self.reverse_phase == 'FINAL_ZERO_STEER_SETTLE':
+                    guidance_text = (
+                        'MANDATORY STOP | centering steer=0 before reverse'
                     )
-                    else '--'
-                )
-                lidar_raw_left_text = (
-                    f'{self.lidar_raw_left_m:.2f}'
-                    if self.lidar_raw_left_m is not None
-                    else '--'
-                )
-                lidar_raw_right_text = (
-                    f'{self.lidar_raw_right_m:.2f}'
-                    if self.lidar_raw_right_m is not None
-                    else '--'
-                )
-                guidance_text = (
-                    f'LiDAR -90/+90={lidar_left_text}/'
-                    f'{lidar_right_text}m '
-                    f'diff={lidar_difference_text}m '
-                    f'raw={lidar_raw_left_text}/{lidar_raw_right_text}m '
-                    f'far={self.lidar_side_far_frames}/'
-                    f'{self.lidar_side_far_confirm_frames}'
-                )
+                elif self.reverse_phase == 'FINAL_STRAIGHT_DRIVE':
+                    guidance_text = (
+                        'FINAL steer=0 continuous reverse | '
+                        f'original gone L/R='
+                        f'{int(self.reference_upper_gone)}/'
+                        f'{int(self.reference_lower_gone)}'
+                    )
+                else:
+                    guidance_text = (
+                        f'{self.final_correction_duration:.1f}s tilt '
+                        f'correction {self.final_correction_count}/'
+                        f'{self.final_correction_segment_count} | '
+                        f'original gone L/R='
+                        f'{int(self.reference_upper_gone)}/'
+                        f'{int(self.reference_lower_gone)}'
+                    )
+            else:
+                guidance_text = f'phase={self.reverse_phase}'
             cv2.putText(
                 image,
                 guidance_text,
