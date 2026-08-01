@@ -8,15 +8,18 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Int16, Int16MultiArray
 
-
 MOTOR_CONTROL_TOPIC = '/motor_control'
 ARDUINO_COMMAND_TOPIC = '/arduino/motor_command'
 STEERING_RAW_TOPIC = '/arduino/steering_raw'
 COMMAND_RATE = 20.0
 INPUT_TIMEOUT = 0.5
 STEERING_FEEDBACK_TIMEOUT = 0.5
-
 MAX_DRIVE_PWM = 230
+# [소프트 스타트] 구동 출력이 '초당' 최대 몇 PWM까지 올라갈 수 있는지(가속 속도).
+# 정지 상태에서 큰 값이 한 번에 나가 트랙이 밀리는 것을 막기 위한 값.
+# 크면 빨리 붙고(램프 약함), 작으면 천천히 붙는다(밀림 방지 강함).
+# 0→최대(230)까지 걸리는 시간 ≈ MAX_DRIVE_PWM / DRIVE_ACCEL_PWM_PER_SEC 초.
+DRIVE_ACCEL_PWM_PER_SEC = 300.0
 STEER_PWM = 150
 STEER_MAX_ANGLE_DEG = 45.0
 STEER_ANGLE_TOLERANCE_DEG = 1.0
@@ -29,7 +32,6 @@ STEER_PID_KD = 0.5
 STEER_PID_INTEGRAL_LIMIT_PWM = 30.0
 STEER_PID_DERIVATIVE_FILTER_ALPHA = 0.25
 STEER_MIN_PWM = 40
-
 # The parking controller publishes an already-calculated steering target.  Its
 # low-gain proportional loop avoids amplifying a small target update into a
 # large steering-motor correction while retaining raw-angle feedback.
@@ -55,6 +57,8 @@ class DriveControlNode(Node):
             STEERING_FEEDBACK_TIMEOUT,
         )
         self.declare_parameter('max_drive_pwm', MAX_DRIVE_PWM)
+        # [소프트 스타트] 가속 속도 파라미터 선언.
+        self.declare_parameter('drive_accel_pwm_per_sec', DRIVE_ACCEL_PWM_PER_SEC)
         self.declare_parameter('steer_pwm', STEER_PWM)
         self.declare_parameter('steer_max_angle_deg', STEER_MAX_ANGLE_DEG)
         self.declare_parameter(
@@ -76,7 +80,6 @@ class DriveControlNode(Node):
             STEER_PID_DERIVATIVE_FILTER_ALPHA,
         )
         self.declare_parameter('steer_min_pwm', STEER_MIN_PWM)
-
         self.motor_control_topic = str(
             self.get_parameter('motor_control_topic').value
         )
@@ -102,6 +105,10 @@ class DriveControlNode(Node):
         )
         self.max_drive_pwm = max(
             0, min(255, int(self.get_parameter('max_drive_pwm').value))
+        )
+        # [소프트 스타트] 가속 속도(PWM/초) 읽기. 음수가 들어와도 0으로 막아 안전 처리.
+        self.drive_accel_pwm_per_sec = max(
+            0.0, float(self.get_parameter('drive_accel_pwm_per_sec').value)
         )
         self.steer_pwm = max(
             0, min(255, abs(int(self.get_parameter('steer_pwm').value)))
@@ -175,17 +182,18 @@ class DriveControlNode(Node):
             self.steer_raw_left = STEER_RAW_LEFT
             self.steer_raw_center = STEER_RAW_CENTER
             self.steer_raw_right = STEER_RAW_RIGHT
-
         self.last_input_time = None
         self.last_steering_feedback_time = None
         self.drive_pwm = 0
+        # [소프트 스타트] 지금 실제로 내보내는 구동 값. 목표(drive_pwm)로 곧장 점프하지
+        # 않고 매 주기마다 이 값을 조금씩 목표 쪽으로 움직여 서서히 가속한다.
+        self.current_drive_pwm = 0
         self.target_steer_angle_deg = 0.0
         self.steer_angle_deg = 0.0
         self.steer_raw_value = None
         self.steer_angle_velocity_deg_per_sec = 0.0
         self.pid_integral_error = 0.0
         self.last_pid_update_time = None
-
         self.command_publisher = self.create_publisher(
             Int16MultiArray,
             self.arduino_command_topic,
@@ -212,15 +220,16 @@ class DriveControlNode(Node):
             f'{self.steer_raw_left}/{self.steer_raw_center}/'
             f'{self.steer_raw_right}; PID='
             f'{self.steer_pid_kp:.2f}/{self.steer_pid_ki:.2f}/'
-            f'{self.steer_pid_kd:.2f}'
+            f'{self.steer_pid_kd:.2f}; '
+            f'drive accel ramp={self.drive_accel_pwm_per_sec:.0f} pwm/s'
         )
 
     def motor_control_callback(self, msg):
         self.last_input_time = self.get_clock().now()
         steer = int(msg.data[0]) if len(msg.data) > 0 else 0
         speed = int(msg.data[1]) if len(msg.data) > 1 else 0
+        # 목표 구동값만 갱신한다. 실제 출력 램프는 timer_callback에서 처리.
         self.drive_pwm = self.limit_drive_pwm(speed)
-
         previous_error = (
             self.target_steer_angle_deg - self.steer_angle_deg
         )
@@ -263,9 +272,10 @@ class DriveControlNode(Node):
 
     def timer_callback(self):
         now = self.get_clock().now()
-
         if self.is_input_stale(now):
             self.reset_pid_controller()
+            # [소프트 스타트] 정지 상태이므로 출력값도 0으로 리셋 → 다음 출발 때 0부터 램프.
+            self.current_drive_pwm = 0
             steer_pwm, drive_pwm = 0, 0
         elif self.is_steering_feedback_stale(now):
             self.reset_pid_controller()
@@ -273,11 +283,44 @@ class DriveControlNode(Node):
                 'Steering A1 feedback missing/stale; stopping vehicle',
                 throttle_duration_sec=1.0,
             )
+            # [소프트 스타트] 안전 정지 시에도 출력값 리셋.
+            self.current_drive_pwm = 0
             steer_pwm, drive_pwm = 0, 0
         else:
             steer_pwm = self.calculate_steer_pwm(self.pid_dt(now))
-            drive_pwm = self.drive_pwm
+            # [소프트 스타트] 목표 구동값으로 바로 보내지 않고 램프를 거쳐 서서히 올린 값을 전송.
+            drive_pwm = self.ramp_drive_output(self.drive_pwm)
         self.publish_command(steer_pwm, drive_pwm)
+
+    def ramp_drive_output(self, target):
+        # [소프트 스타트] 구동 출력의 '가속(값이 커지는 방향)'에만 속도 제한을 건다.
+        # 감속·정지·방향전환은 즉시 반영해 브레이크 반응성은 그대로 유지한다.
+        target = self.limit_drive_pwm(target)
+        current = self.current_drive_pwm
+
+        # 목표와 현재 출력의 부호(전진/후진)가 같은 방향인지 판단.
+        same_direction = (target >= 0) == (current >= 0)
+
+        if same_direction and abs(target) <= abs(current):
+            # ① 같은 방향에서 크기가 작아짐 → 감속/정지이므로 즉시 반영.
+            current = target
+        elif current != 0 and not same_direction:
+            # ② 전진↔후진 방향 전환 → 일단 0으로 즉시 멈춘 뒤,
+            #    다음 틱부터 반대 방향으로 다시 램프한다.
+            current = 0
+        else:
+            # ③ 같은 방향으로 더 세게, 또는 정지에서 출발(가속) → 틱당 step만큼만 증가.
+            #    step = 초당 가속량 / 제어 주파수 (예: 300 / 20Hz = 15/틱)
+            step = max(
+                1, int(round(self.drive_accel_pwm_per_sec / self.command_rate_hz))
+            )
+            if target >= 0:
+                current = min(target, current + step)   # 전진: 목표를 넘지 않게 올림
+            else:
+                current = max(target, current - step)   # 후진: 목표를 넘지 않게 내림
+
+        self.current_drive_pwm = current
+        return current
 
     def pid_dt(self, now):
         nominal_dt = 1.0 / self.command_rate_hz
@@ -297,7 +340,6 @@ class DriveControlNode(Node):
         if abs(error) <= self.steer_angle_tolerance_deg:
             self.pid_integral_error = 0.0
             return 0
-
         candidate_integral = self.pid_integral_error + error * dt
         if self.steer_pid_ki > 0.0:
             integral_limit = (
@@ -309,7 +351,6 @@ class DriveControlNode(Node):
             )
         else:
             candidate_integral = 0.0
-
         proportional = self.steer_pid_kp * error
         derivative = (
             -self.steer_pid_kd
@@ -320,7 +361,6 @@ class DriveControlNode(Node):
             + self.steer_pid_ki * candidate_integral
             + derivative
         )
-
         # 출력 포화 방향으로 적분이 더 쌓이는 경우에는 이번 적분을 버린다.
         if (
             abs(candidate_output) > self.steer_pwm
@@ -334,7 +374,6 @@ class DriveControlNode(Node):
         else:
             self.pid_integral_error = candidate_integral
             output = candidate_output
-
         output = max(-self.steer_pwm, min(self.steer_pwm, output))
         if 0.0 < abs(output) < self.steer_min_pwm:
             output = self.steer_min_pwm if output > 0.0 else -self.steer_min_pwm
