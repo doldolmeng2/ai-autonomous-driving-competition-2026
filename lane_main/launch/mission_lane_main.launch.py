@@ -26,7 +26,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'debug_window_name', default_value='mission_lane_main_debug'
         ),
-        DeclareLaunchArgument('driving_mode', default_value='1lane'),
+        DeclareLaunchArgument('driving_mode', default_value='2lane'),
         DeclareLaunchArgument('reference_x_1lane', default_value='500'),
         DeclareLaunchArgument('reference_x_2lane', default_value='208'),
         DeclareLaunchArgument('close_confirm_samples', default_value='5'),
@@ -98,9 +98,6 @@ def generate_launch_description():
                 'steering_control_mode': 'pid',
                 'steer_max_angle_deg': 45.0,
                 'steer_angle_tolerance_deg': 1.0,
-                'steer_raw_left': 560,
-                'steer_raw_center': 490,
-                'steer_raw_right': 420,
                 'steering_feedback_timeout_sec': 0.5,
             }],
         ),

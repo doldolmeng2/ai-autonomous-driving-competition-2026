@@ -28,9 +28,9 @@ DRIVE_DECEL_PWM_PER_SEC = 400.0
 STEER_PWM = 150
 STEER_MAX_ANGLE_DEG = 45.0
 STEER_ANGLE_TOLERANCE_DEG = 1.0
-STEER_RAW_LEFT = 560
-STEER_RAW_CENTER = 490
-STEER_RAW_RIGHT = 420
+STEER_RAW_LEFT = 530
+STEER_RAW_CENTER = 455
+STEER_RAW_RIGHT = 380
 STEER_PID_KP = 10.0
 STEER_PID_KI = 0.0
 STEER_PID_KD = 0.5
@@ -186,7 +186,7 @@ class DriveControlNode(Node):
             > self.steer_raw_right
         ):
             self.get_logger().warn(
-                'Invalid steering raw calibration; using 560/490/420'
+                'Invalid steering raw calibration; using 530/455/380'
             )
             self.steer_raw_left = STEER_RAW_LEFT
             self.steer_raw_center = STEER_RAW_CENTER
