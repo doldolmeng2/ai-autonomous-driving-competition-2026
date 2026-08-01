@@ -20,6 +20,11 @@ MAX_DRIVE_PWM = 230
 # 크면 빨리 붙고(램프 약함), 작으면 천천히 붙는다(밀림 방지 강함).
 # 0→최대(230)까지 걸리는 시간 ≈ MAX_DRIVE_PWM / DRIVE_ACCEL_PWM_PER_SEC 초.
 DRIVE_ACCEL_PWM_PER_SEC = 300.0
+# [소프트 스타트] 감속/정지 시 '초당' 최대 몇 PWM까지 내릴 수 있는지(감속 속도).
+# 스로틀을 놓아 목표가 0이 되거나 목표가 작아질 때 급정지하지 않고 서서히 세운다.
+# 방향 전환(전진↔후진)도 이 속도로 0까지 내려간 뒤 반대로 가속한다.
+# 최대(230)→0까지 걸리는 시간 ≈ MAX_DRIVE_PWM / DRIVE_DECEL_PWM_PER_SEC 초.
+DRIVE_DECEL_PWM_PER_SEC = 400.0
 STEER_PWM = 150
 STEER_MAX_ANGLE_DEG = 45.0
 STEER_ANGLE_TOLERANCE_DEG = 1.0
@@ -57,8 +62,9 @@ class DriveControlNode(Node):
             STEERING_FEEDBACK_TIMEOUT,
         )
         self.declare_parameter('max_drive_pwm', MAX_DRIVE_PWM)
-        # [소프트 스타트] 가속 속도 파라미터 선언.
+        # [소프트 스타트] 가속/감속 속도 파라미터 선언.
         self.declare_parameter('drive_accel_pwm_per_sec', DRIVE_ACCEL_PWM_PER_SEC)
+        self.declare_parameter('drive_decel_pwm_per_sec', DRIVE_DECEL_PWM_PER_SEC)
         self.declare_parameter('steer_pwm', STEER_PWM)
         self.declare_parameter('steer_max_angle_deg', STEER_MAX_ANGLE_DEG)
         self.declare_parameter(
@@ -106,9 +112,12 @@ class DriveControlNode(Node):
         self.max_drive_pwm = max(
             0, min(255, int(self.get_parameter('max_drive_pwm').value))
         )
-        # [소프트 스타트] 가속 속도(PWM/초) 읽기. 음수가 들어와도 0으로 막아 안전 처리.
+        # [소프트 스타트] 가속/감속 속도(PWM/초) 읽기. 음수가 들어와도 0으로 막아 안전 처리.
         self.drive_accel_pwm_per_sec = max(
             0.0, float(self.get_parameter('drive_accel_pwm_per_sec').value)
+        )
+        self.drive_decel_pwm_per_sec = max(
+            0.0, float(self.get_parameter('drive_decel_pwm_per_sec').value)
         )
         self.steer_pwm = max(
             0, min(255, abs(int(self.get_parameter('steer_pwm').value)))
@@ -186,7 +195,7 @@ class DriveControlNode(Node):
         self.last_steering_feedback_time = None
         self.drive_pwm = 0
         # [소프트 스타트] 지금 실제로 내보내는 구동 값. 목표(drive_pwm)로 곧장 점프하지
-        # 않고 매 주기마다 이 값을 조금씩 목표 쪽으로 움직여 서서히 가속한다.
+        # 않고 매 주기마다 이 값을 조금씩 목표 쪽으로 움직여 서서히 가·감속한다.
         self.current_drive_pwm = 0
         self.target_steer_angle_deg = 0.0
         self.steer_angle_deg = 0.0
@@ -221,14 +230,16 @@ class DriveControlNode(Node):
             f'{self.steer_raw_right}; PID='
             f'{self.steer_pid_kp:.2f}/{self.steer_pid_ki:.2f}/'
             f'{self.steer_pid_kd:.2f}; '
-            f'drive accel ramp={self.drive_accel_pwm_per_sec:.0f} pwm/s'
+            f'drive ramp accel/decel='
+            f'{self.drive_accel_pwm_per_sec:.0f}/'
+            f'{self.drive_decel_pwm_per_sec:.0f} pwm/s'
         )
 
     def motor_control_callback(self, msg):
         self.last_input_time = self.get_clock().now()
         steer = int(msg.data[0]) if len(msg.data) > 0 else 0
         speed = int(msg.data[1]) if len(msg.data) > 1 else 0
-        # 목표 구동값만 갱신한다. 실제 출력 램프는 timer_callback에서 처리.
+        # 목표 구동값만 갱신한다. 실제 출력 가·감속 램프는 timer_callback에서 처리.
         self.drive_pwm = self.limit_drive_pwm(speed)
         previous_error = (
             self.target_steer_angle_deg - self.steer_angle_deg
@@ -274,7 +285,7 @@ class DriveControlNode(Node):
         now = self.get_clock().now()
         if self.is_input_stale(now):
             self.reset_pid_controller()
-            # [소프트 스타트] 정지 상태이므로 출력값도 0으로 리셋 → 다음 출발 때 0부터 램프.
+            # [소프트 스타트] 컨트롤러 신호 끊김 = 비상 상황이므로 감속 없이 즉시 정지.
             self.current_drive_pwm = 0
             steer_pwm, drive_pwm = 0, 0
         elif self.is_steering_feedback_stale(now):
@@ -283,41 +294,56 @@ class DriveControlNode(Node):
                 'Steering A1 feedback missing/stale; stopping vehicle',
                 throttle_duration_sec=1.0,
             )
-            # [소프트 스타트] 안전 정지 시에도 출력값 리셋.
+            # [소프트 스타트] 조향 피드백 끊김도 비상 상황이므로 즉시 정지.
             self.current_drive_pwm = 0
             steer_pwm, drive_pwm = 0, 0
         else:
             steer_pwm = self.calculate_steer_pwm(self.pid_dt(now))
-            # [소프트 스타트] 목표 구동값으로 바로 보내지 않고 램프를 거쳐 서서히 올린 값을 전송.
+            # [소프트 스타트] 목표 구동값으로 바로 보내지 않고 가·감속 램프를 거친 값을 전송.
             drive_pwm = self.ramp_drive_output(self.drive_pwm)
         self.publish_command(steer_pwm, drive_pwm)
 
     def ramp_drive_output(self, target):
-        # [소프트 스타트] 구동 출력의 '가속(값이 커지는 방향)'에만 속도 제한을 건다.
-        # 감속·정지·방향전환은 즉시 반영해 브레이크 반응성은 그대로 유지한다.
+        # [소프트 스타트] 구동 출력을 목표값으로 곧장 보내지 않고, 매 틱 제한된 양만큼만
+        # 목표 쪽으로 움직인다. 값이 커지는 '가속'은 accel_step, 값이 작아지는 '감속·정지'는
+        # decel_step 으로 각각 속도를 제한해 급출발과 급정지를 모두 부드럽게 만든다.
+        # (컨트롤러 신호가 끊긴 '비상 정지'는 timer_callback에서 즉시 0으로 처리한다.)
         target = self.limit_drive_pwm(target)
         current = self.current_drive_pwm
+        accel_step = max(
+            1, int(round(self.drive_accel_pwm_per_sec / self.command_rate_hz))
+        )
+        decel_step = max(
+            1, int(round(self.drive_decel_pwm_per_sec / self.command_rate_hz))
+        )
 
-        # 목표와 현재 출력의 부호(전진/후진)가 같은 방향인지 판단.
-        same_direction = (target >= 0) == (current >= 0)
-
-        if same_direction and abs(target) <= abs(current):
-            # ① 같은 방향에서 크기가 작아짐 → 감속/정지이므로 즉시 반영.
-            current = target
-        elif current != 0 and not same_direction:
-            # ② 전진↔후진 방향 전환 → 일단 0으로 즉시 멈춘 뒤,
-            #    다음 틱부터 반대 방향으로 다시 램프한다.
-            current = 0
-        else:
-            # ③ 같은 방향으로 더 세게, 또는 정지에서 출발(가속) → 틱당 step만큼만 증가.
-            #    step = 초당 가속량 / 제어 주파수 (예: 300 / 20Hz = 15/틱)
-            step = max(
-                1, int(round(self.drive_accel_pwm_per_sec / self.command_rate_hz))
-            )
-            if target >= 0:
-                current = min(target, current + step)   # 전진: 목표를 넘지 않게 올림
+        if current == 0:
+            # 정지 상태에서 출발 → 목표 방향으로 accel_step 만큼 가속.
+            if target > 0:
+                current = min(target, accel_step)
+            elif target < 0:
+                current = max(target, -accel_step)
+        elif (current > 0) == (target > 0) and target != 0:
+            # 같은 방향(전진끼리 또는 후진끼리).
+            if abs(target) >= abs(current):
+                # 목표가 더 세다 → 가속(accel_step).
+                if current > 0:
+                    current = min(target, current + accel_step)
+                else:
+                    current = max(target, current - accel_step)
             else:
-                current = max(target, current - step)   # 후진: 목표를 넘지 않게 내림
+                # 목표가 더 약하다 → 감속(decel_step).
+                if current > 0:
+                    current = max(target, current - decel_step)
+                else:
+                    current = min(target, current + decel_step)
+        else:
+            # 목표가 0(정지)이거나 반대 방향(역전) → decel_step 으로 0까지 감속.
+            # 0에 도달하면 다음 틱부터 위의 '정지에서 출발' 분기로 반대 방향 가속.
+            if current > 0:
+                current = max(0, current - decel_step)
+            else:
+                current = min(0, current + decel_step)
 
         self.current_drive_pwm = current
         return current
