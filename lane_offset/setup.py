@@ -11,6 +11,7 @@ setup(
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/launch', glob('launch/*.launch.py')),
+        ('share/' + package_name + '/config', glob('config/*.yaml')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -25,6 +26,7 @@ setup(
             'mission_lane_offset_node = lane_offset.mission_lane_offset_node:main',
             'mission_lane_offset_node_osy = lane_offset.mission_lane_offset_node_osy:main',
             'lane_offset_debug_viewer_node = lane_offset.lane_offset_debug_viewer_node:main',
+            'select_color_profile = lane_offset.select_color_profile:main',
         ],
     },
 )

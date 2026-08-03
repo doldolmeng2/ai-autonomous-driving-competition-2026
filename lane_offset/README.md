@@ -44,3 +44,25 @@ mission: /lane_info + /camera/high/image_raw -> lane_offset -> /lane_offset
 디버그 화면에서 하늘색 박스가 배제된 바깥 실선(`color`=색으로 확인,
 `memory`=기억으로 유지), 자홍 박스가 중앙 점선으로 선택된 덩어리다.
 초록/회색 임계값은 `sensor_utils`의 `hsv_tuner_node`로 맞춘다.
+
+## 장소별 색상 프로필
+
+색상 임계값은 `config/color_profiles.yaml`에 장소별로 저장한다. 새 장소는
+`lions_hall` 항목 전체를 복사하고 장소 이름과 HSV/YCrCb 값만 수정한다.
+`mission`과 `timed`는 사용하는 색상 구성이 다르므로 두 영역을 모두 작성해야
+하며, 범위는 항상 `[최솟값, 최댓값]` 순서로 적는다.
+
+빌드한 뒤 아래 명령으로 사용할 장소를 선택한다.
+
+```bash
+ros2 run lane_offset select_color_profile
+```
+
+장소 이름이나 화면에 표시된 번호를 입력하면 선택값이
+`~/.config/lane_offset/active_color_profile`에 저장된다. 실행 중인 차선 노드에는
+즉시 반영되지 않으며, `timed_lane_offset_node` 또는
+`mission_lane_offset_node`를 재시작할 때 적용된다. 시작 로그의
+`Color profile=...` 메시지로 실제 적용된 프로필을 확인할 수 있다.
+
+YAML 형식이나 색상 범위가 잘못되면 노드는 오류를 출력하고 코드에 내장된 기존
+임계값으로 안전하게 실행된다. 선택 명령은 잘못된 프로필을 저장하지 않는다.
