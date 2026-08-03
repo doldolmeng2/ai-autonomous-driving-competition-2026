@@ -169,7 +169,8 @@ MAX_OFFSET_JUMP = 2000
 OFFSET_SMOOTHING_ALPHA = 1.0
 
 # 디버그 시각화
-DEBUG_VIEW = False
+# launch 파일에서 덮어쓰지 않고 이 노드의 상수로 디버그 창 여부를 결정한다.
+DEBUG_VIEW = True
 WINDOW_NAME = 'timed_lane_offset_ngg'
 WHITE_MASK_WINDOW_NAME = 'ngg_white_mask'
 GREEN_MASK_WINDOW_NAME = 'ngg_green_mask'

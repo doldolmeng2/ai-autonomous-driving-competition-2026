@@ -23,6 +23,8 @@
     덩어리도 이어지지 않으면(outer_memory_max_misses) 스스로 버려진다.
 """
 
+import math
+
 import numpy as np
 import rclpy
 from rclpy.node import Node
@@ -49,7 +51,7 @@ COLOR_CLASSES = [
         'name': 'white',
         'color_bgr': (255, 255, 255),
         'hsv': {'h': (0, 179), 's': (0, 44), 'v': (161, 255)},
-        'ycrcb': {'y': (135, 255), 'cr': (81, 165), 'cb': (122, 170)},
+        'ycrcb': {'y': (175, 255), 'cr': (81, 165), 'cb': (122, 170)},
     },
 ]
 
@@ -85,6 +87,9 @@ OUTER_SIDE_MARGIN_PX = 2
 OUTER_HALO_MARGIN_PX = 5
 # 이보다 작은 흰 덩어리는 바깥 실선 판정 자체를 하지 않는다(노이즈).
 OUTER_MIN_COMPONENT_PIXELS = 60
+# 바깥 차선은 실선이므로 BEV 높이에서 이 비율 이상 이어져야 한다. 중앙 점선
+# 조각 옆 아스팔트가 밝은 회색으로 잡히더라도 외곽선 기억을 만들지 않게 한다.
+OUTER_MIN_VERTICAL_SPAN_RATIO = 0.60
 # 기억한 바깥 실선 x에서 이 거리 안에 있는 덩어리는 색 근거가 없어도 바깥 실선.
 OUTER_MEMORY_TOLERANCE_PX = 40
 # 기억 위치를 이번 프레임에 이어진 덩어리 쪽으로 옮기는 비율(차선 변경 중 추적).
@@ -121,12 +126,12 @@ NEAR_FIELD_ROWS = 100
 # 근접 밴드에서 흰색 비율이 이 값을 넘으면 횡단보도 등으로 판단하고 무시
 WHITE_OVERLOAD_RATIO = 0.15
 
-# 2차선에서 시작하며 /lane_info가 바뀌면 모드별 기준값으로 전환한다.
-DRIVING_MODE = '1lane'
+# 시작 차선은 이 노드에서 정하지 않는다. mission_lane_main_node가 발행하는
+# /lane_info를 단일 기준으로 사용한다.
 # 640px BEV에서 차가 정상 위치일 때 보이는 중앙 점선의 x좌표.
 # 1차선은 화면 오른쪽 점선, 2차선은 화면 왼쪽 점선을 각각 기준으로 삼는다.
-DASHED_REFERENCE_X_PX_2LANE = 108
-DASHED_REFERENCE_X_PX_1LANE = 570
+DASHED_REFERENCE_X_PX_2LANE = 190
+DASHED_REFERENCE_X_PX_1LANE = 510
 # 기준선과 이만큼 차이 나면 lane_offset의 최대/최소값(+/-45)에 도달한다.
 OFFSET_ERROR_LIMIT_PX = 195
 LANE_OFFSET_LIMIT = 45
@@ -135,6 +140,12 @@ LANE_OFFSET_LIMIT = 45
 OFFSET_KP = 2.0
 # 한 프레임 사이 offset이 이 값보다 더 튀면 오검출로 보고 이전 값 유지
 MAX_OFFSET_JUMP_PX = 80
+# 중앙 점선 미검출 시 현재 차선 안쪽으로 꺾는 offset 누적량.
+# 2차선은 좌회전(-), 1차선은 우회전(+) 방향이다.
+NO_DASH_RECOVERY_STEP = 3
+# 차로 전환 시 조향 기준을 한 프레임에 이동시킬 최대 픽셀 수. 검출 시작점은
+# 이 값과 무관하게 기존에 추적하던 물리적 중앙선 위치를 계속 사용한다.
+LANE_REFERENCE_TRANSITION_STEP_PX = 5.0
 
 # 슬라이딩 윈도우. BEV 세로 방향 박스를 약 20px로 얇게 나눈다.
 NUM_WINDOWS = 15
@@ -148,11 +159,19 @@ DASH_MIN_WIDTH_PX = 10
 DASH_MIN_AVERAGE_WIDTH_PX = 8.0
 DASH_MAX_AVERAGE_WIDTH_PX = 40.0
 DASH_MIN_COMPONENT_PIXELS = 80
+# 중앙선의 기준 조각은 위의 엄격한 조건으로 정하되, 그 조각과 같은 선상에 있는
+# 짧은 점선 조각도 시각화/추적 연결에 사용할 수 있도록 완화한 보조 조건.
+DASH_SUPPORT_MIN_VERTICAL_SPAN_PX = 15
+DASH_SUPPORT_MIN_COMPONENT_PIXELS = 60
 # ROI 높이 대부분을 계속 잇는 성분은 점선이 아니라 실선으로 본다.
 DASH_MAX_VERTICAL_SPAN_RATIO = 0.92
 # 서로 다른 높이에 나타나는 위/아래 점선 조각을 한 트랙으로 묶는다.
-DASH_MAX_TRACKED_PIECES = 2
+DASH_MAX_TRACKED_PIECES = 4
 DASH_MAX_VERTICAL_OVERLAP_RATIO = 0.25
+# 같은 중앙선으로 선택된 인접 점선 조각 사이를 선으로 연결하는 조건.
+DASH_CONNECT_MAX_VERTICAL_GAP_PX = 200
+DASH_CONNECT_MAX_HORIZONTAL_GAP_PX = 100
+DASH_CONNECT_THICKNESS_PX = 8
 # 이전 프레임의 검출 위치를 다음 프레임 윈도우 시작점에 반영하는 비율.
 # 0.20이면 한 프레임에 차이의 20%만 움직여 급격한 점프를 막는다.
 WINDOW_START_ADAPT_RATE = 0.7
@@ -165,6 +184,7 @@ MAX_WINDOW_START_JUMP_PX = 180
 DEBUG_VIEW = True
 WINDOW_NAME = 'mission_lane_offset_debug'
 WHITE_MASK_WINDOW_NAME = 'mission_lane_offset_white_mask'
+CONNECTED_DASH_WINDOW_NAME = 'mission_lane_offset_connected_dash'
 DEBUG_IMAGE_TOPIC = '/lane_offset/debug_image'
 
 
@@ -220,6 +240,9 @@ class MissionLaneOffsetNode(Node):
             'outer_min_component_pixels', OUTER_MIN_COMPONENT_PIXELS
         )
         self.declare_parameter(
+            'outer_min_vertical_span_ratio', OUTER_MIN_VERTICAL_SPAN_RATIO
+        )
+        self.declare_parameter(
             'outer_memory_tolerance_px', OUTER_MEMORY_TOLERANCE_PX
         )
         self.declare_parameter('outer_memory_adapt_rate', OUTER_MEMORY_ADAPT_RATE)
@@ -230,13 +253,16 @@ class MissionLaneOffsetNode(Node):
             'outer_memory_max_age_frames', OUTER_MEMORY_MAX_AGE_FRAMES
         )
         self.declare_parameter('outer_memory_max_misses', OUTER_MEMORY_MAX_MISSES)
-        self.declare_parameter('driving_mode', DRIVING_MODE)
         self.declare_parameter('dashed_reference_x_px_2lane', DASHED_REFERENCE_X_PX_2LANE)
         self.declare_parameter('dashed_reference_x_px_1lane', DASHED_REFERENCE_X_PX_1LANE)
         self.declare_parameter('offset_error_limit_px', OFFSET_ERROR_LIMIT_PX)
         self.declare_parameter('lane_offset_limit', LANE_OFFSET_LIMIT)
         self.declare_parameter('offset_kp', OFFSET_KP)
         self.declare_parameter('max_offset_jump_px', MAX_OFFSET_JUMP_PX)
+        self.declare_parameter(
+            'lane_reference_transition_step_px',
+            LANE_REFERENCE_TRANSITION_STEP_PX,
+        )
         self.declare_parameter('num_windows', NUM_WINDOWS)
         self.declare_parameter('dashed_window_margin', DASHED_WINDOW_MARGIN)
         self.declare_parameter(
@@ -253,6 +279,14 @@ class MissionLaneOffsetNode(Node):
             'dash_min_component_pixels', DASH_MIN_COMPONENT_PIXELS
         )
         self.declare_parameter(
+            'dash_support_min_vertical_span_px',
+            DASH_SUPPORT_MIN_VERTICAL_SPAN_PX,
+        )
+        self.declare_parameter(
+            'dash_support_min_component_pixels',
+            DASH_SUPPORT_MIN_COMPONENT_PIXELS,
+        )
+        self.declare_parameter(
             'dash_max_vertical_span_ratio', DASH_MAX_VERTICAL_SPAN_RATIO
         )
         self.declare_parameter(
@@ -261,6 +295,17 @@ class MissionLaneOffsetNode(Node):
         self.declare_parameter(
             'dash_max_vertical_overlap_ratio',
             DASH_MAX_VERTICAL_OVERLAP_RATIO,
+        )
+        self.declare_parameter(
+            'dash_connect_max_vertical_gap_px',
+            DASH_CONNECT_MAX_VERTICAL_GAP_PX,
+        )
+        self.declare_parameter(
+            'dash_connect_max_horizontal_gap_px',
+            DASH_CONNECT_MAX_HORIZONTAL_GAP_PX,
+        )
+        self.declare_parameter(
+            'dash_connect_thickness_px', DASH_CONNECT_THICKNESS_PX
         )
         self.declare_parameter('window_min_component_pixels', WINDOW_MIN_COMPONENT_PIXELS)
         self.declare_parameter('window_start_adapt_rate', WINDOW_START_ADAPT_RATE)
@@ -323,6 +368,11 @@ class MissionLaneOffsetNode(Node):
         self.outer_min_component_pixels = max(
             1, int(self.get_parameter('outer_min_component_pixels').value)
         )
+        self.outer_min_vertical_span_ratio = float(np.clip(
+            self.get_parameter('outer_min_vertical_span_ratio').value,
+            0.0,
+            1.0,
+        ))
         self.outer_memory_tolerance_px = max(
             0.0, float(self.get_parameter('outer_memory_tolerance_px').value)
         )
@@ -338,23 +388,16 @@ class MissionLaneOffsetNode(Node):
         self.outer_memory_max_misses = max(
             1, int(self.get_parameter('outer_memory_max_misses').value)
         )
-        self.driving_mode = str(self.get_parameter('driving_mode').value).lower()
-        if self.driving_mode not in ('1lane', '2lane'):
-            self.get_logger().warn(
-                f"Unknown driving_mode='{self.driving_mode}'; using '1lane'"
-            )
-            self.driving_mode = '1lane'
         self.dashed_reference_x_px_2lane = int(
             self.get_parameter('dashed_reference_x_px_2lane').value
         )
         self.dashed_reference_x_px_1lane = int(
             self.get_parameter('dashed_reference_x_px_1lane').value
         )
-        self.dashed_reference_x_px = (
-            self.dashed_reference_x_px_2lane
-            if self.driving_mode == '2lane'
-            else self.dashed_reference_x_px_1lane
-        )
+        self.driving_mode = None
+        self.dashed_reference_x_px = None
+        self.dashed_reference_target_x_px = None
+        self.lane_reference_transition_active = False
         self.offset_error_limit_px = max(
             1, int(self.get_parameter('offset_error_limit_px').value)
         )
@@ -364,6 +407,14 @@ class MissionLaneOffsetNode(Node):
         self.offset_kp = max(0.0, float(self.get_parameter('offset_kp').value))
         self.max_offset_jump_px = int(
             self.get_parameter('max_offset_jump_px').value
+        )
+        self.lane_reference_transition_step_px = max(
+            0.1,
+            float(
+                self.get_parameter(
+                    'lane_reference_transition_step_px'
+                ).value
+            ),
         )
         self.num_windows = int(self.get_parameter('num_windows').value)
         self.dashed_window_margin = int(
@@ -385,6 +436,22 @@ class MissionLaneOffsetNode(Node):
         self.dash_min_component_pixels = max(
             1, int(self.get_parameter('dash_min_component_pixels').value)
         )
+        self.dash_support_min_vertical_span_px = max(
+            1,
+            int(
+                self.get_parameter(
+                    'dash_support_min_vertical_span_px'
+                ).value
+            ),
+        )
+        self.dash_support_min_component_pixels = max(
+            1,
+            int(
+                self.get_parameter(
+                    'dash_support_min_component_pixels'
+                ).value
+            ),
+        )
         self.dash_max_vertical_span_ratio = float(np.clip(
             self.get_parameter('dash_max_vertical_span_ratio').value,
             0.0,
@@ -398,6 +465,25 @@ class MissionLaneOffsetNode(Node):
             0.0,
             1.0,
         ))
+        self.dash_connect_max_vertical_gap_px = max(
+            0,
+            int(
+                self.get_parameter(
+                    'dash_connect_max_vertical_gap_px'
+                ).value
+            ),
+        )
+        self.dash_connect_max_horizontal_gap_px = max(
+            0,
+            int(
+                self.get_parameter(
+                    'dash_connect_max_horizontal_gap_px'
+                ).value
+            ),
+        )
+        self.dash_connect_thickness_px = max(
+            1, int(self.get_parameter('dash_connect_thickness_px').value)
+        )
         self.window_min_component_pixels = int(
             self.get_parameter('window_min_component_pixels').value
         )
@@ -410,13 +496,14 @@ class MissionLaneOffsetNode(Node):
         self.debug_view = bool(self.get_parameter('debug_view').value)
         self.window_name = WINDOW_NAME
         self.white_mask_window_name = WHITE_MASK_WINDOW_NAME
+        self.connected_dash_window_name = CONNECTED_DASH_WINDOW_NAME
         self.publish_debug_image = False
         self.debug_image_topic = DEBUG_IMAGE_TOPIC
 
         # 마지막으로 발행한(유효했던) offset. 오검출 프레임에서는 이 값을 그대로 재사용.
         self.last_offset = 0
         # 다음 프레임의 중앙 점선 슬라이딩 윈도우 시작점.
-        self.window_start_x = {'dashed': float(self.dashed_reference_x_px)}
+        self.window_start_x = {'dashed': None}
         # 마지막으로 유효했던 중앙 점선 슬라이딩 윈도우. 인식 공백에서도 디버그
         # 박스가 사라지지 않도록 유지한다.
         self.last_lane_tracks = None
@@ -428,6 +515,9 @@ class MissionLaneOffsetNode(Node):
         }
         # 이번 프레임에 바깥 실선으로 제외한 덩어리 박스(디버그 표시용).
         self.last_outer_boxes = []
+        # 이번 프레임에서 같은 중앙선으로 이어 붙인 점선 조각의 끝점 쌍.
+        self.last_dashed_connections = []
+        self.last_connected_dashed_mask = None
 
         qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -436,13 +526,12 @@ class MissionLaneOffsetNode(Node):
         )
         self.offset_pub = self.create_publisher(Int16, self.lane_offset_topic, 10)
         self.debug_pub = self.create_publisher(Image, self.debug_image_topic, qos)
-        self.create_subscription(Image, self.image_topic, self.image_callback, qos)
         self.create_subscription(Int16, LANE_INFO_TOPIC, self.lane_info_callback, 10)
+        self.create_subscription(Image, self.image_topic, self.image_callback, qos)
 
         self.get_logger().info(
             f'Subscribing {self.image_topic}, publishing {self.lane_offset_topic}, '
-            f'driving_mode={self.driving_mode}, '
-            f'dashed_reference_x_px={self.dashed_reference_x_px}, '
+            f'waiting for {LANE_INFO_TOPIC} to select the starting lane, '
             f'offset_kp={self.offset_kp:.2f}, '
             f'debug_view={self.debug_view}, '
             f'offset range=+/-{self.lane_offset_limit}'
@@ -462,7 +551,7 @@ class MissionLaneOffsetNode(Node):
         self.set_driving_mode(f'{lane_number}lane')
 
     def set_driving_mode(self, mode, force=False):
-        """차로 기준만 바꾸고 현재 추적 중인 물리적 중앙선은 이어간다."""
+        """기존 중앙선 추적을 유지한 채 새 차로 기준으로 서서히 전환한다."""
         mode = str(mode).lower()
         if mode not in ('1lane', '2lane'):
             return
@@ -471,23 +560,68 @@ class MissionLaneOffsetNode(Node):
 
         previous_track_x = self.window_start_x.get('dashed')
         self.driving_mode = mode
-        self.dashed_reference_x_px = (
+        new_reference_x = float(
             self.dashed_reference_x_px_1lane
             if mode == '1lane'
             else self.dashed_reference_x_px_2lane
         )
-        # 기준 x는 조향 목표일 뿐 검출 시작점이 아니다. 차선 전환 중에도 직전에
-        # 보던 동일한 점선 주변에서 다음 프레임 탐색을 계속한다.
-        if force or previous_track_x is None:
+
+        # 최초 /lane_info에서는 해당 차로 기준으로 즉시 초기화한다. 이후 모드
+        # 변경에서는 현재 기준값을 유지하고 목표값만 새 차로 기준으로 바꾼다.
+        if force or self.dashed_reference_x_px is None:
+            self.dashed_reference_x_px = new_reference_x
+            self.lane_reference_transition_active = False
+        else:
+            self.lane_reference_transition_active = not np.isclose(
+                self.dashed_reference_x_px, new_reference_x
+            )
+        self.dashed_reference_target_x_px = new_reference_x
+
+        # 조향 기준과 검출 시작점은 독립적이다. 차로 전환 중에도 직전에 보던
+        # 동일한 물리적 중앙선 주변에서 다음 프레임 탐색을 계속한다.
+        if previous_track_x is None:
             previous_track_x = float(self.dashed_reference_x_px)
         self.window_start_x = {'dashed': float(previous_track_x)}
         self.get_logger().info(
             f'Driving mode changed to {mode}; '
-            f'dashed_reference_x={self.dashed_reference_x_px}, '
+            f'dashed_reference_x={self.dashed_reference_x_px:.1f} -> '
+            f'{self.dashed_reference_target_x_px:.1f}, '
             f'continuing_track_x={previous_track_x:.1f}'
         )
 
+    def advance_lane_reference_transition(self):
+        """현재 조향 기준을 새 차로 목표 기준 쪽으로 한 단계 이동한다."""
+        if not self.lane_reference_transition_active:
+            return False
+
+        delta = (
+            self.dashed_reference_target_x_px
+            - self.dashed_reference_x_px
+        )
+        step = self.lane_reference_transition_step_px
+        if abs(delta) <= step:
+            self.dashed_reference_x_px = self.dashed_reference_target_x_px
+            self.lane_reference_transition_active = False
+            self.get_logger().info(
+                f'Lane reference transition complete: '
+                f'{self.dashed_reference_x_px:.1f}'
+            )
+        else:
+            self.dashed_reference_x_px += math.copysign(step, delta)
+        return True
+
     def image_callback(self, msg):
+        # 시작 차선의 단일 기준은 mission_lane_main_node의 DRIVING_MODE이다.
+        # 첫 /lane_info 전에 임의 차선 기준으로 잘못된 offset을 내보내지 않는다.
+        if self.driving_mode is None:
+            self.get_logger().info(
+                f'Waiting for {LANE_INFO_TOPIC}; skipping image',
+                throttle_duration_sec=1.0,
+            )
+            return
+
+        self.advance_lane_reference_transition()
+
         frame = self.to_bgr(msg)
         if frame is None:
             return
@@ -533,15 +667,18 @@ class MissionLaneOffsetNode(Node):
         dashed_mask, dashed_components = self.find_center_dashed_component(
             white_mask, dashed_start_x, outer_masks
         )
+        self.show_connected_dashed_view()
         if dashed_mask is None:
+            recovery_offset = self.apply_no_dash_recovery()
             self.get_logger().warn(
-                'No center-dash component; holding last offset',
+                f'No center-dash component; {self.driving_mode} recovery '
+                f'offset={recovery_offset}',
                 throttle_duration_sec=1.0,
             )
-            self.publish_offset(self.last_offset)
+            self.publish_offset(recovery_offset)
             self.publish_debug(
                 msg, frame, 'NO DASH', near_white_ratio,
-                base_x=dashed_start_x,
+                base_x=dashed_start_x, lane_offset=recovery_offset,
             )
             return
 
@@ -552,15 +689,17 @@ class MissionLaneOffsetNode(Node):
         dashed_x, windows, points_x, points_y = dashed_track
         lane_tracks = {'dashed': dashed_track}
         if dashed_x is None:
+            recovery_offset = self.apply_no_dash_recovery()
             self.get_logger().warn(
-                'Center dash sliding-window detection failed; holding last offset',
+                f'Center dash sliding-window detection failed; '
+                f'{self.driving_mode} recovery offset={recovery_offset}',
                 throttle_duration_sec=1.0,
             )
-            self.publish_offset(self.last_offset)
+            self.publish_offset(recovery_offset)
             self.publish_debug(
                 msg, frame, 'DASH TRACK FAILED', near_white_ratio,
                 base_x=dashed_start_x, windows=windows,
-                lane_tracks=lane_tracks,
+                lane_tracks=lane_tracks, lane_offset=recovery_offset,
             )
             return
 
@@ -598,6 +737,16 @@ class MissionLaneOffsetNode(Node):
         msg = Int16()
         msg.data = int(np.clip(value, -self.lane_offset_limit, self.lane_offset_limit))
         self.offset_pub.publish(msg)
+
+    def apply_no_dash_recovery(self):
+        """중앙선 미검출 동안 차선별 복구 방향으로 offset을 누적한다."""
+        direction = -1 if self.driving_mode == '2lane' else 1
+        self.last_offset = int(np.clip(
+            self.last_offset + direction * NO_DASH_RECOVERY_STEP,
+            -self.lane_offset_limit,
+            self.lane_offset_limit,
+        ))
+        return self.last_offset
 
     def map_lane_x_to_offset(self, detected_lane_x):
         """점선 오차에 Kp를 적용해 -45~45 offset으로 매핑한다."""
@@ -781,16 +930,21 @@ class MissionLaneOffsetNode(Node):
         kernel = cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE, (kernel_size, kernel_size)
         )
+        height, width = labels.shape
         big_labels = [
             label for label in range(1, num_labels)
-            if stats[label, cv2.CC_STAT_AREA] >= self.outer_min_component_pixels
+            if (
+                stats[label, cv2.CC_STAT_AREA]
+                >= self.outer_min_component_pixels
+                and stats[label, cv2.CC_STAT_HEIGHT] / float(height)
+                >= self.outer_min_vertical_span_ratio
+            )
         ]
 
         sides = {}       # label -> (side, source)
         confirmed = {}   # side -> x (이번 프레임 색 근거로 확인된 위치)
         matched = {}     # side -> x (색이든 기억이든 이어진 위치)
 
-        height, width = labels.shape
         pad = self.outer_near_distance_px
         usable = {
             color_class['side']: (
@@ -917,6 +1071,8 @@ class MissionLaneOffsetNode(Node):
 
     def find_center_dashed_component(self, white_mask, expected_x, outer_masks=None):
         """기준 x 주변에서 점선 모양에 가장 가까운 흰 성분 하나를 반환한다."""
+        self.last_dashed_connections = []
+        self.last_connected_dashed_mask = np.zeros_like(white_mask)
         height, _width = white_mask.shape
         # 가로선 제거가 점선과 교차한 지점에 만든 작은 틈만 세로로 복구한다.
         reconnect_height = max(
@@ -945,6 +1101,7 @@ class MissionLaneOffsetNode(Node):
             for label, (side, source) in outer_sides.items()
         ]
         candidates = []
+        support_candidates = []
         for label in range(1, num_labels):
             if label in outer_sides:
                 # 바깥 실선(초록/회색이 옆에 있거나, 직전에 그렇게 판정한 위치)
@@ -954,16 +1111,15 @@ class MissionLaneOffsetNode(Node):
             spans_full_height = y <= 2 and y + h >= height - 2
             vertical_span_ratio = h / float(height)
             average_width = area / float(h)
-            if (
-                h < self.dash_min_vertical_span_px
-                or w < self.dash_min_width_px
-                or average_width < self.dash_min_average_width_px
-                or average_width > self.dash_max_average_width_px
-                or area < self.dash_min_component_pixels
-                or h <= w
-                or spans_full_height
-                or vertical_span_ratio > self.dash_max_vertical_span_ratio
-            ):
+            common_shape_ok = (
+                w >= self.dash_min_width_px
+                and average_width >= self.dash_min_average_width_px
+                and average_width <= self.dash_max_average_width_px
+                and h > w
+                and not spans_full_height
+                and vertical_span_ratio <= self.dash_max_vertical_span_ratio
+            )
+            if not common_shape_ok:
                 continue
 
             # 기울어진 점선은 bbox 중심보다 ROI 하단 연장점이 차량 위치 오차를
@@ -980,8 +1136,23 @@ class MissionLaneOffsetNode(Node):
                 float(expected_x) - float(x + w - 1),
                 0.0,
             )
-            if min(distance, bbox_distance) <= self.dashed_window_margin:
-                candidates.append((distance, bottom_x, label, x, y, w, h))
+            if min(distance, bbox_distance) > self.dashed_window_margin:
+                continue
+
+            candidate = (distance, bottom_x, label, x, y, w, h)
+            if (
+                h >= self.dash_support_min_vertical_span_px
+                and area >= self.dash_support_min_component_pixels
+            ):
+                support_candidates.append(candidate)
+            if (
+                h < self.dash_min_vertical_span_px
+                or area < self.dash_min_component_pixels
+            ):
+                # 짧은 조각은 단독 중앙선으로 채택하지 않고, 아래에서 엄격한
+                # 기준 조각과 같은 선상일 때만 보조 조각으로 연결한다.
+                continue
+            candidates.append(candidate)
 
         if not candidates:
             return None, []
@@ -990,10 +1161,17 @@ class MissionLaneOffsetNode(Node):
         # 조각도 같은 트랙에 추가한다. 같은 높이의 평행 실선은 제외된다.
         primary = min(candidates, key=lambda candidate: candidate[0])
         selected = [primary]
-        for candidate in sorted(candidates, key=lambda item: item[0]):
+        for candidate in sorted(support_candidates, key=lambda item: item[0]):
             if candidate is primary:
                 continue
-            _distance, _bottom_x, _label, _x, y, _w, h = candidate
+            _distance, bottom_x, _label, _x, y, _w, h = candidate
+            # 첨부 코드의 last_line_x lock과 같은 원리로, 기준 조각을 하단까지
+            # 연장했을 때의 x와 너무 먼 조각은 다른 흰 선으로 보고 제외한다.
+            if (
+                abs(bottom_x - primary[1])
+                > self.dash_connect_max_horizontal_gap_px
+            ):
+                continue
             vertically_separate = True
             for chosen in selected:
                 chosen_y, chosen_h = chosen[4], chosen[6]
@@ -1015,7 +1193,70 @@ class MissionLaneOffsetNode(Node):
         for _distance, _bottom_x, label, x, y, w, h in selected:
             filtered[labels == label] = 255
             boxes.append((int(x), int(y), int(w), int(h)))
+        self.connect_selected_dashed_components(filtered, labels, selected)
+        self.last_connected_dashed_mask = filtered.copy()
         return filtered, boxes
+
+    def connect_selected_dashed_components(self, mask, labels, selected):
+        """같은 중앙선의 위·아래 점선 조각 사이 공백을 선분으로 채운다."""
+        geometries = []
+        for candidate in selected:
+            label = candidate[2]
+            ys, xs = np.where(labels == label)
+            if ys.size == 0:
+                continue
+            y_top = int(ys.min())
+            y_bottom = int(ys.max())
+            if len(np.unique(ys)) >= 3:
+                slope, intercept = np.polyfit(ys, xs, 1)
+                x_top = float(slope * y_top + intercept)
+                x_bottom = float(slope * y_bottom + intercept)
+            else:
+                x_top = x_bottom = float(xs.mean())
+            geometries.append({
+                'top': (int(round(x_top)), y_top),
+                'bottom': (int(round(x_bottom)), y_bottom),
+            })
+
+        geometries.sort(key=lambda item: item['top'][1])
+        for upper, lower in zip(geometries, geometries[1:]):
+            start = upper['bottom']
+            end = lower['top']
+            vertical_gap = end[1] - start[1]
+            horizontal_gap = abs(end[0] - start[0])
+            if vertical_gap <= 0:
+                continue
+            if vertical_gap > self.dash_connect_max_vertical_gap_px:
+                continue
+            if horizontal_gap > self.dash_connect_max_horizontal_gap_px:
+                continue
+            cv2.line(
+                mask,
+                start,
+                end,
+                255,
+                self.dash_connect_thickness_px,
+                cv2.LINE_8,
+            )
+            self.last_dashed_connections.append((start, end))
+
+    def show_connected_dashed_view(self):
+        """원본 점선 조각은 흰색, 이어 붙인 구간은 노란색으로 표시한다."""
+        if not self.debug_view or self.last_connected_dashed_mask is None:
+            return
+        debug = cv2.cvtColor(
+            self.last_connected_dashed_mask, cv2.COLOR_GRAY2BGR
+        )
+        for start, end in self.last_dashed_connections:
+            cv2.line(
+                debug,
+                start,
+                end,
+                (0, 255, 255),
+                self.dash_connect_thickness_px,
+                cv2.LINE_AA,
+            )
+        cv2.imshow(self.connected_dash_window_name, debug)
 
     def get_window_start_x(self, lane_name, fallback_x):
         """저장된 시작점이 있으면 사용하고, 첫 프레임만 색/모드 기준값을 쓴다."""
@@ -1158,6 +1399,16 @@ class MissionLaneOffsetNode(Node):
                 cv2.rectangle(
                     debug, (x, y), (x + w - 1, y + h - 1), (255, 0, 255), 2
                 )
+        # 같은 중앙선으로 판정해 점선 공백을 이어 붙인 선분(굵은 노랑).
+        for start, end in self.last_dashed_connections:
+            cv2.line(
+                debug,
+                (start[0], start[1] + self.roi_top),
+                (end[0], end[1] + self.roi_top),
+                (0, 255, 255),
+                3,
+                cv2.LINE_AA,
+            )
         # 현재 주행 모드의 하드코딩 중앙 점선 기준 위치(주황, "여기면 lane_offset=0")
         self.draw_dashed_vline(
             debug, self.dashed_reference_x_px,
@@ -1213,9 +1464,12 @@ class MissionLaneOffsetNode(Node):
         lines = [
             f'status: {status}',
             f'lane_offset: {lane_offset if lane_offset is not None else self.last_offset}',
-            f'mode: {self.driving_mode}, dashed_ref_x: {self.dashed_reference_x_px}',
+            f'mode: {self.driving_mode}, dashed_ref_x: '
+            f'{self.dashed_reference_x_px:.1f} -> '
+            f'{self.dashed_reference_target_x_px:.1f}',
             f'white_ratio: {near_white_ratio:.2f}',
             f'outer: {self.describe_outer_memory()}',
+            f'dash_links: {len(self.last_dashed_connections)} (yellow)',
         ]
         for i, text in enumerate(lines):
             cv2.putText(
