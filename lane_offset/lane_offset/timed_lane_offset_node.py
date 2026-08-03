@@ -42,6 +42,8 @@ from std_msgs.msg import Int16
 
 import cv2
 
+from .color_profiles import load_color_classes
+
 # ============================================================================
 # 파라미터 기본값 - 튜닝은 대부분 여기서만 하면 된다.
 # (전부 ROS 파라미터로도 선언되므로 --ros-args -p 로 실행 중 덮어쓰기도 가능)
@@ -199,6 +201,20 @@ class TimedLaneOffsetNggNode(Node):
 
     def __init__(self):
         super().__init__('timed_lane_offset_node_ngg')
+
+        try:
+            self.color_classes, self.color_profile_name, profile_path = (
+                load_color_classes(COLOR_CLASSES, 'timed')
+            )
+            self.get_logger().info(
+                f'Color profile={self.color_profile_name} ({profile_path})'
+            )
+        except (OSError, ValueError) as error:
+            self.color_profile_name = 'built-in fallback'
+            self.color_classes = COLOR_CLASSES
+            self.get_logger().error(
+                f'Color profile load failed; using built-in values: {error}'
+            )
 
         self.declare_parameter('bev_y_top_ratio', BEV_Y_TOP_RATIO)
         self.declare_parameter('bev_y_bottom_ratio', BEV_Y_BOTTOM_RATIO)
@@ -554,7 +570,7 @@ class TimedLaneOffsetNggNode(Node):
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         ycrcb = cv2.cvtColor(frame, cv2.COLOR_BGR2YCrCb)
         segmented = np.full_like(frame, BACKGROUND_COLOR_BGR, dtype=np.uint8)
-        for color_class in COLOR_CLASSES:
+        for color_class in self.color_classes:
             mask = class_mask(hsv, ycrcb, color_class)
             segmented[mask > 0] = color_class['color_bgr']
         return segmented

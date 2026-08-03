@@ -32,6 +32,8 @@ from std_msgs.msg import Int16
 
 import cv2
 
+from .color_profiles import load_color_classes
+
 # ============================================================================
 # 파라미터 기본값 - 튜닝은 대부분 여기서만 하면 된다.
 # (전부 ROS 파라미터로도 선언되므로 --ros-args -p 로 실행 중 덮어쓰기도 가능)
@@ -192,6 +194,27 @@ class MissionLaneOffsetNode(Node):
 
     def __init__(self):
         super().__init__('mission_lane_offset_node')
+
+        try:
+            color_classes, self.color_profile_name, profile_path = load_color_classes(
+                list(COLOR_CLASSES) + list(OUTER_COLOR_CLASSES), 'mission'
+            )
+            self.color_classes = [
+                item for item in color_classes if item['name'] == 'white'
+            ]
+            self.outer_color_classes = [
+                item for item in color_classes if item['name'] != 'white'
+            ]
+            self.get_logger().info(
+                f'Color profile={self.color_profile_name} ({profile_path})'
+            )
+        except (OSError, ValueError) as error:
+            self.color_profile_name = 'built-in fallback'
+            self.color_classes = COLOR_CLASSES
+            self.outer_color_classes = OUTER_COLOR_CLASSES
+            self.get_logger().error(
+                f'Color profile load failed; using built-in values: {error}'
+            )
 
         # ---- 파라미터 ------------------------------------------------------
         self.declare_parameter('bev_y_top_ratio', BEV_Y_TOP_RATIO)
@@ -424,7 +447,7 @@ class MissionLaneOffsetNode(Node):
         # 덩어리를 중앙 점선으로 오인하지 않도록 유지한다.
         # {'left'|'right': {'x': float, 'age': int, 'misses': int} 또는 None}
         self.outer_memory = {
-            color_class['side']: None for color_class in OUTER_COLOR_CLASSES
+            color_class['side']: None for color_class in self.outer_color_classes
         }
         # 이번 프레임에 바깥 실선으로 제외한 덩어리 박스(디버그 표시용).
         self.last_outer_boxes = []
@@ -626,7 +649,7 @@ class MissionLaneOffsetNode(Node):
         segmented = np.full_like(
             frame, BACKGROUND_COLOR_BGR, dtype=np.uint8
         )
-        for color_class in list(OUTER_COLOR_CLASSES) + list(COLOR_CLASSES):
+        for color_class in self.outer_color_classes + self.color_classes:
             mask = class_mask(hsv, ycrcb, color_class)
             segmented[mask > 0] = color_class['color_bgr']
         return segmented
@@ -648,7 +671,7 @@ class MissionLaneOffsetNode(Node):
             halo = np.zeros_like(white)
 
         masks = {}
-        for color_class in OUTER_COLOR_CLASSES:
+        for color_class in self.outer_color_classes:
             color = color_class['color_bgr']
             mask = cv2.inRange(bev, color, color)
             masks[color_class['side']] = cv2.bitwise_and(
@@ -761,7 +784,7 @@ class MissionLaneOffsetNode(Node):
 
         white_debug = cv2.cvtColor(white_mask, cv2.COLOR_GRAY2BGR)
         if outer_masks:
-            for color_class in OUTER_COLOR_CLASSES:
+            for color_class in self.outer_color_classes:
                 mask = outer_masks.get(color_class['side'])
                 if mask is not None:
                     white_debug[mask > 0] = color_class['color_bgr']
@@ -797,7 +820,7 @@ class MissionLaneOffsetNode(Node):
                 outer_masks.get(color_class['side']) is not None
                 and outer_masks[color_class['side']].any()
             )
-            for color_class in OUTER_COLOR_CLASSES
+            for color_class in self.outer_color_classes
         }
 
         for label in big_labels:
@@ -811,7 +834,7 @@ class MissionLaneOffsetNode(Node):
             x0, x1 = max(0, left - pad), min(width, right + pad + 1)
             y0, y1 = max(0, top - pad), min(height, bottom + pad + 1)
             neighborhood = None
-            for color_class in OUTER_COLOR_CLASSES:
+            for color_class in self.outer_color_classes:
                 side = color_class['side']
                 if not usable[side]:
                     continue
