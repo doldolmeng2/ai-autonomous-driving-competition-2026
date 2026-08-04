@@ -86,9 +86,15 @@ HORIZONTAL_ERASE_HALF_BAND_PX = 5
 GREEN_NEAR_DISTANCE_PX = 20
 # 이웃 영역 안 초록 픽셀이 이 수 이상이어야 "매트 옆 실선"으로 인정한다.
 GREEN_MIN_PIXELS = 10
+# 1차선 밝은 회색 근거는 초록과 별도로 절대 픽셀 수와 주변 영역 비율을 모두 본다.
+LIGHT_GRAY_MIN_PIXELS = 10
+LIGHT_GRAY_MIN_RATIO = 0.08
 # 초록이 덩어리보다 오른쪽에 있어야 한다(중앙 점선/왼쪽 실선 배제).
 # 이웃 초록의 평균 x가 덩어리 평균 x보다 이 값 이상 커야 한다.
 GREEN_RIGHT_MARGIN_PX = -1000
+# 1차선 경계 근거인 밝은 회색은 BEV 왼쪽 절반에서만 사용한다.
+# 오른쪽 바닥/구조물이 밝은 회색으로 분류되어 차선 변경이 조기 완료되는 것을 막는다.
+LIGHT_GRAY_MASK_MAX_X_RATIO = 0.5
 ################################################################
 
 
@@ -212,6 +218,8 @@ class MissionLaneOffsetNode(Node):
         )
         self.declare_parameter('green_near_distance_px', GREEN_NEAR_DISTANCE_PX)
         self.declare_parameter('green_min_pixels', GREEN_MIN_PIXELS)
+        self.declare_parameter('light_gray_min_pixels', LIGHT_GRAY_MIN_PIXELS)
+        self.declare_parameter('light_gray_min_ratio', LIGHT_GRAY_MIN_RATIO)
         self.declare_parameter('green_right_margin_px', GREEN_RIGHT_MARGIN_PX)
         self.declare_parameter('min_component_area', MIN_COMPONENT_AREA)
         self.declare_parameter('min_line_height_px', MIN_LINE_HEIGHT_PX)
@@ -342,6 +350,10 @@ class MissionLaneOffsetNode(Node):
         )
         self.green_near_distance_px = max(1, int(get('green_near_distance_px')))
         self.green_min_pixels = int(get('green_min_pixels'))
+        self.light_gray_min_pixels = max(0, int(get('light_gray_min_pixels')))
+        self.light_gray_min_ratio = float(np.clip(
+            get('light_gray_min_ratio'), 0.0, 1.0
+        ))
         self.green_right_margin_px = float(get('green_right_margin_px'))
         self.min_component_area = int(get('min_component_area'))
         self.min_line_height_px = int(get('min_line_height_px'))
@@ -728,9 +740,36 @@ class MissionLaneOffsetNode(Node):
             item['color_bgr'] for item in self.color_classes
             if item['name'] == color_name
         )
-        return (
+        mask = (
             np.all(segmented_bev == color, axis=2).astype(np.uint8) * 255
         )
+        if color_name == 'light_gray':
+            cutoff_x = int(round(mask.shape[1] * LIGHT_GRAY_MASK_MAX_X_RATIO))
+            mask[:, cutoff_x:] = 0
+            green_color = next(
+                item['color_bgr'] for item in self.color_classes
+                if item['name'] == 'green'
+            )
+            green_mask = (
+                np.all(segmented_bev == green_color, axis=2).astype(np.uint8) * 255
+            )
+            green_right_x = self.find_green_blob_right_x(green_mask)
+            if green_right_x is not None:
+                # 유효한 초록 뭉탱이들의 오른쪽 끝보다 오른쪽인 회색은 제외한다.
+                mask[:, green_right_x + 1:] = 0
+        return mask
+
+    def find_green_blob_right_x(self, green_mask):
+        """최소 픽셀 수를 충족한 초록 연결요소들의 가장 오른쪽 x를 반환한다."""
+        num_labels, _, stats, _ = cv2.connectedComponentsWithStats(
+            green_mask, connectivity=8
+        )
+        right_edges = []
+        for label in range(1, num_labels):
+            x, _, width, _, area = stats[label]
+            if area >= self.green_min_pixels:
+                right_edges.append(int(x + width - 1))
+        return max(right_edges) if right_edges else None
 
     def make_green_mask(self, segmented_bev):
         """Compatibility wrapper for existing tests and callers."""
@@ -842,7 +881,12 @@ class MissionLaneOffsetNode(Node):
             neighborhood = cv2.dilate(comp.astype(np.uint8), kernel) > 0
             color_near = color_bool & neighborhood
             color_count = int(np.count_nonzero(color_near))
-            if color_count < self.green_min_pixels:
+            # 밝은 회색은 흰 선을 뺀 실제 주변 띠에서 차지하는 비율까지 확인한다.
+            # 초록은 기존 절대 픽셀 수 판정을 그대로 유지한다.
+            evidence_area = int(np.count_nonzero(neighborhood & ~comp))
+            if not self.boundary_color_evidence_valid(
+                side, color_count, evidence_area
+            ):
                 continue
             color_mean_x = float(np.nonzero(color_near)[1].mean())
             comp_mean_x = float(centroids[label][0])
@@ -876,6 +920,13 @@ class MissionLaneOffsetNode(Node):
         if measured_x is None:
             return line_mask, None, mode, 'near band empty'
         return line_mask, measured_x, mode, ''
+
+    def boundary_color_evidence_valid(self, side, color_count, evidence_area):
+        if side != 'left':
+            return color_count >= self.green_min_pixels
+        if color_count < self.light_gray_min_pixels or evidence_area <= 0:
+            return False
+        return (color_count / float(evidence_area)) >= self.light_gray_min_ratio
 
     @staticmethod
     def component_elongation(component_mask):

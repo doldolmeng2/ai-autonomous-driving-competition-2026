@@ -17,7 +17,7 @@ LANE_CHANGE_COMPLETE_TOPIC = '/lane_change_complete'
 MOTOR_CONTROL_TOPIC = '/motor_control'
 
 ######## 최대 조향각(angle임. +-45도) 및 속도(PWM. 0~255) ########
-BASE_SPEED = 120
+BASE_SPEED = 200
 MAX_STEER = 45
 ##############################################################
 
@@ -29,7 +29,7 @@ MAX_STEER = 45
 DRIVING_MODE = '2lane'
 # LiDAR 각도: 후진 0도, 오른쪽 +90도, 왼쪽 -90도, 전진 +/-180도.
 # 2차선은 왼쪽(-100~-90도), 1차선은 오른쪽(+90~+100도)에서
-# 0.7m 이내 물체가 보였다가 사라지면 추월이 완료된 것으로 본다.
+# 지정 거리 이내 물체가 CLOSE로 잡히면 1초 뒤 차선을 변경한다.
 LIDAR_RIGHT_ANGLE_MIN_DEG = 90.0
 LIDAR_RIGHT_ANGLE_MAX_DEG = 100.0
 LIDAR_LEFT_ANGLE_MIN_DEG = -100.0
@@ -38,6 +38,8 @@ LIDAR_OVERTAKE_MAX_DISTANCE_M = 1.0
 LIDAR_OVERTAKE_CLEAR_DISTANCE_M = 1.2
 LIDAR_DETECT_CONFIRM_SCANS = 3
 LIDAR_CLEAR_CONFIRM_SCANS = 3
+# CLOSE가 한 번 감지되면 이 시간 뒤에 바로 차선을 변경한다.
+LIDAR_CLOSE_LANE_CHANGE_DELAY_SEC = 1.0
 # 한 번의 노드 실행에서 각 방향(1->2, 2->1)으로 허용할 최대 변경 횟수.
 LANE_CHANGE_MAX_PER_DIRECTION = 1
 ##############################################################
@@ -61,7 +63,7 @@ TRAFFIC_LIGHT_BRIGHT_CORE_MIN_PIXELS = 10
 TRAFFIC_LIGHT_CONFIRM_FRAMES = 3
 # 실제 주행에서 3,000픽셀 조건에 도달하지 못한 경우가 있어 정지 조건을
 # 완화한다. 색상/위치/형태/밝은 LED 중심과 연속 프레임 검증은 그대로 유지한다.
-RED_STOP_PIXEL_COUNT = 4000
+RED_STOP_PIXEL_COUNT = 1000
 RED_RESUME_PIXEL_COUNT = 700
 GREEN_GO_PIXEL_COUNT = 200
 GREEN_STRAIGHT_DURATION_SEC = 3.0
@@ -124,6 +126,10 @@ class MissionLaneMainNode(Node):
         )
         self.declare_parameter(
             'lidar_clear_confirm_scans', LIDAR_CLEAR_CONFIRM_SCANS
+        )
+        self.declare_parameter(
+            'lidar_close_lane_change_delay_sec',
+            LIDAR_CLOSE_LANE_CHANGE_DELAY_SEC,
         )
         self.declare_parameter(
             'lane_change_max_per_direction',
@@ -225,6 +231,12 @@ class MissionLaneMainNode(Node):
         )
         self.lidar_clear_confirm_scans = max(
             1, int(self.get_parameter('lidar_clear_confirm_scans').value)
+        )
+        self.lidar_close_lane_change_delay_sec = max(
+            0.0,
+            float(
+                self.get_parameter('lidar_close_lane_change_delay_sec').value
+            ),
         )
         self.lane_change_max_per_direction = max(
             0,
@@ -376,6 +388,7 @@ class MissionLaneMainNode(Node):
         self.green_straight_deadline_ns = None
         self.last_lane_offset = None
         self.lane_change_armed = False
+        self.lane_change_deadline_ns = None
         self.detect_sample_count = 0
         self.clear_sample_count = 0
         self.lidar_object_detected = False
@@ -389,6 +402,7 @@ class MissionLaneMainNode(Node):
         # 주기적으로 lane_info를 발행한다.
         self.create_timer(0.2, self.publish_lane_info)
         self.create_timer(0.05, self.update_green_straight_mode)
+        self.create_timer(0.05, self.update_lane_change_timer)
 
         self.get_logger().info(
             f'Subscribing {LOW_IMAGE_TOPIC}, {self.scan_topic}, '
@@ -502,14 +516,12 @@ class MissionLaneMainNode(Node):
             return self.lidar_left_angle_min_deg, self.lidar_left_angle_max_deg
         return self.lidar_right_angle_min_deg, self.lidar_right_angle_max_deg
 
-    def update_lane_change(self, close, clear):
-        """Change lanes after a side LiDAR object is seen and then disappears."""
+    def update_lane_change(self, close, _clear):
+        """Latch the first CLOSE observation and change lanes one second later."""
         if self.pending_lane_change_target is not None:
             # 초 단위 쿨다운 대신, offset 노드가 목표 차선의 색상 경계
             # 흰 실선을 확인할 때까지 다음 차선 변경 판정을 잠근다.
-            self.lane_change_armed = False
-            self.detect_sample_count = 0
-            self.clear_sample_count = 0
+            self.reset_lane_change_delay()
             return False
 
         transition = (
@@ -517,54 +529,59 @@ class MissionLaneMainNode(Node):
             1 if self.lane_number == 2 else 2,
         )
         if not self.lane_change_direction_available(transition):
-            self.lane_change_armed = False
-            self.detect_sample_count = 0
-            self.clear_sample_count = 0
+            self.reset_lane_change_delay()
             return False
 
-        if not self.lane_change_armed:
-            if close:
-                self.detect_sample_count += 1
-            else:
-                self.detect_sample_count = 0
-
-            if (
-                self.detect_sample_count
-                >= self.lidar_detect_confirm_scans
-            ):
-                self.lane_change_armed = True
-                self.detect_sample_count = 0
-                self.clear_sample_count = 0
-                sector_min, sector_max = self.active_lidar_sector_deg()
-                self.get_logger().info(
-                    f'{self.driving_mode}: LiDAR object confirmed in '
-                    f'{sector_min:+.0f}..{sector_max:+.0f} deg within '
-                    f'{self.lidar_overtake_max_distance_m:.2f} m; '
-                    'lane change armed'
-                )
-            return False
-
-        if clear:
-            self.clear_sample_count += 1
-        else:
-            self.clear_sample_count = 0
-
-        if self.clear_sample_count >= self.lidar_clear_confirm_scans:
-            previous_mode = self.driving_mode
-            previous_lane = self.lane_number
-            self.lane_number = 1 if self.lane_number == 2 else 2
-            self.lane_change_counts[(previous_lane, self.lane_number)] += 1
-            self.pending_lane_change_target = self.lane_number
-            self.lane_change_armed = False
-            self.detect_sample_count = 0
-            self.clear_sample_count = 0
-            self.publish_lane_info()
-            self.get_logger().info(
-                'Lane change trigger: LiDAR side object disappeared; '
-                f'{previous_mode} -> {self.driving_mode}'
+        if close and self.lane_change_deadline_ns is None:
+            self.lane_change_armed = True
+            self.lane_change_deadline_ns = (
+                self.get_clock().now().nanoseconds
+                + int(self.lidar_close_lane_change_delay_sec * 1_000_000_000)
             )
-            return True
+            sector_min, sector_max = self.active_lidar_sector_deg()
+            self.get_logger().info(
+                f'{self.driving_mode}: LiDAR CLOSE in '
+                f'{sector_min:+.0f}..{sector_max:+.0f} deg within '
+                f'{self.lidar_overtake_max_distance_m:.2f} m; changing lane in '
+                f'{self.lidar_close_lane_change_delay_sec:.1f} s'
+            )
         return False
+
+    def update_lane_change_timer(self):
+        if self.lane_change_deadline_ns is None:
+            return False
+        if self.get_clock().now().nanoseconds < self.lane_change_deadline_ns:
+            return False
+        if self.pending_lane_change_target is not None:
+            self.reset_lane_change_delay()
+            return False
+
+        transition = (
+            self.lane_number,
+            1 if self.lane_number == 2 else 2,
+        )
+        if not self.lane_change_direction_available(transition):
+            self.reset_lane_change_delay()
+            return False
+
+        previous_mode = self.driving_mode
+        self.lane_number = transition[1]
+        self.lane_change_counts[transition] += 1
+        self.pending_lane_change_target = self.lane_number
+        self.reset_lane_change_delay()
+        self.publish_lane_info()
+        self.get_logger().info(
+            f'Lane change trigger: {self.lidar_close_lane_change_delay_sec:.1f} s '
+            'elapsed after LiDAR CLOSE; '
+            f'{previous_mode} -> {self.driving_mode}'
+        )
+        return True
+
+    def reset_lane_change_delay(self):
+        self.lane_change_armed = False
+        self.lane_change_deadline_ns = None
+        self.detect_sample_count = 0
+        self.clear_sample_count = 0
 
     def lane_change_direction_available(self, transition=None):
         """지정 방향의 차선 변경 횟수가 허용 범위 안인지 확인한다."""
@@ -584,9 +601,7 @@ class MissionLaneMainNode(Node):
         if completed_lane != self.pending_lane_change_target:
             return
         self.pending_lane_change_target = None
-        self.lane_change_armed = False
-        self.detect_sample_count = 0
-        self.clear_sample_count = 0
+        self.reset_lane_change_delay()
         self.get_logger().info(
             f'Lane {completed_lane} boundary line acquired; '
             'next lane-change detection unlocked'
@@ -795,8 +810,17 @@ class MissionLaneMainNode(Node):
         elif not self.lane_change_direction_available():
             next_lane = 1 if self.lane_number == 2 else 2
             state = f'LIMIT: {self.lane_number}->{next_lane} USED'
+        elif self.lane_change_armed:
+            remaining_sec = max(
+                0.0,
+                (
+                    self.lane_change_deadline_ns
+                    - self.get_clock().now().nanoseconds
+                ) / 1_000_000_000,
+            )
+            state = f'CLOSE: CHANGE IN {remaining_sec:.1f}s'
         else:
-            state = 'ARMED: WAIT CLEAR' if self.lane_change_armed else 'WATCH CLOSE'
+            state = 'WATCH CLOSE'
         if self.red_stop_active:
             drive_state = 'STOP'
         elif self.green_straight_active:
@@ -825,15 +849,12 @@ class MissionLaneMainNode(Node):
                 ),
             ),
             (
-                f'state: {state}  detect={self.detect_sample_count}/'
-                f'{self.lidar_detect_confirm_scans}  '
-                f'clear={self.clear_sample_count}/'
-                f'{self.lidar_clear_confirm_scans}',
+                f'state: {state}',
                 (0, 255, 0) if self.lane_change_armed else (255, 255, 255),
             ),
             (
                 f'lidar: close<={self.lidar_overtake_max_distance_m:.2f}m  '
-                f'clear>{self.lidar_overtake_clear_distance_m:.2f}m',
+                f'delay={self.lidar_close_lane_change_delay_sec:.1f}s',
                 (200, 200, 200),
             ),
             (
