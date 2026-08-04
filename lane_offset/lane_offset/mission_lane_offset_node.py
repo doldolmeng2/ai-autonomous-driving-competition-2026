@@ -1,15 +1,44 @@
-"""Track mission-lane outer solid lines and publish steering offsets.
+"""mission_lane_offset_node.
 
-2lane follows the white solid line beside the green road edge. 1lane follows
-the white solid line beside the light-gray road edge. During a lane change the
-node steers toward the destination lane until its corresponding solid line is
-visible, then resumes line-based offset control.
+시간주행 차선 인식/조향 로직을 독립적으로 복사하고, 1차선 및 차선 변경 기능을 추가한다.
+
+원본 시간주행 설명:
+
+역할:
+    /camera/high/image_raw 를 받아 "오른쪽 실선"을 찾고, 그 실선이 화면의 특정
+    x좌표(target_right_x)에 오도록 /lane_offset 을 발행한다.
+
+설계 요점(기존 노드와 다른 점):
+    1) 기본 기준은 **오른쪽 실선**이다. 초록 매트가 보이지 않아 오른쪽 실선
+       검증에 실패하면, 중앙 점선을 대체 기준으로 사용한다.
+    2) 조향에 쓰는 x는 실선 전체가 아니라 **차량과 y축으로 가장 가까운 부분**만
+       사용한다. 실선은 커브에서 휘기 때문에, 전체 평균을 기준 x에 맞추려 하면
+       먼 쪽 곡률에 끌려가 오히려 차선을 이탈할 수 있다. 그래서 화면 아래쪽
+       근접 밴드(near band)의 픽셀만으로 x를 잰다.
+    3) 중앙 점선을 오른쪽 실선으로 오인하면 안 된다. 트랙에서 오른쪽 실선
+       **바깥(오른쪽)에는 초록 매트**가 있으므로, 흰색 덩어리 주변에 초록색이
+       충분히 있고 그 초록이 덩어리보다 **오른쪽**에 있을 때만 오른쪽 실선으로
+       인정한다. (중앙 점선은 양옆이 회색 아스팔트라 걸러진다.)
+
+좌표/부호 규약:
+
+
+    화면 x는 차가 오른쪽으로 치우칠수록 작아진다(오른쪽 실선이 화면 안쪽으로
+    들어옴). 따라서
+        error = measured_x - target_right_x
+        error < 0  -> 차가 오른쪽으로 치우침 -> offset < 0 -> 좌조향
+    으로, 기존 노드들과 동일한 부호 규약을 따른다.
+
+디버그 시각화(debug_view:=True):
+    - 기준 x 세로선(주황)과 라벨
+    - 조향 x를 재는 근접 밴드(초록 반투명 띠)
+    - 오른쪽 실선으로 인정된 덩어리 **전체**를 빨강으로 칠함(마스킹 확인용)
+    - 초록 매트 근거 영역(파랑 점)과 측정 x(노란 원), 상태 텍스트
 """
-
-import math
 
 import numpy as np
 import rclpy
+from rcl_interfaces.msg import SetParametersResult
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image
@@ -22,163 +51,126 @@ from .color_profiles import load_color_classes
 ######################## 구독/발행 토픽 ########################
 IMAGE_TOPIC = '/camera/high/image_raw'
 LANE_OFFSET_TOPIC = '/lane_offset'
+DEBUG_IMAGE_TOPIC = '/lane_offset/debug_image'
 LANE_INFO_TOPIC = '/lane_info'
 LANE_CHANGE_COMPLETE_TOPIC = '/lane_change_complete'
+
+# 미션 전용: 1차선 기준과 차선 변경 고정 조향값.
+TARGET_LEFT_X = 100
+TARGET_CENTER_X_1LANE = 510
+LANE_CHANGE_STEER_OFFSET = 45
 ################################################################
 
 
-####################### 바깥 차선 필터/기억 #######################
-# 흰 덩어리를 이 픽셀만큼 부풀린 이웃에서 바깥 색을 찾는다(BEV 좌표 기준).
-OUTER_NEAR_DISTANCE_PX = 20
-# 이웃 안 바깥 색 픽셀이 이 수 이상이어야 "바깥 실선"으로 인정한다.
-# 진짜 초록 매트/회색 영역은 수천 픽셀이므로 넉넉히 잡아도 된다.
-OUTER_MIN_PIXELS = 40
-# 근거는 덩어리 bbox에서 기대하는 쪽으로 이만큼 더 바깥에서부터 센다.
-OUTER_SIDE_MARGIN_PX = 2
-# 밝은 흰 선 가장자리는 번짐 때문에 밝은 회색으로 분류되기 쉽다. 흰색에서 이
-# 거리 안의 색은 "옆 영역" 근거로 쓰지 않는다(중앙 점선의 자기 테두리를 보고
-# 바깥 실선이라고 오판하는 것을 막는 핵심 값).
-OUTER_HALO_MARGIN_PX = 5
-# 이보다 작은 흰 덩어리는 바깥 실선 판정 자체를 하지 않는다(노이즈).
-OUTER_MIN_COMPONENT_PIXELS = 60
-# 바깥 차선은 실선이므로 BEV 높이에서 이 비율 이상 이어져야 한다. 중앙 점선
-# 조각 옆 아스팔트가 밝은 회색으로 잡히더라도 외곽선 기억을 만들지 않게 한다.
-OUTER_MIN_VERTICAL_SPAN_RATIO = 0.60
-# 회색 도로 경계는 BEV 왼쪽 절반에서만 근거로 사용한다.
-LIGHT_GRAY_MASK_MAX_X_RATIO = 0.5
-# 기억한 바깥 실선 x에서 이 거리 안에 있는 덩어리는 색 근거가 없어도 바깥 실선.
-OUTER_MEMORY_TOLERANCE_PX = 40
-# 기억 위치를 이번 프레임에 이어진 덩어리 쪽으로 옮기는 비율(차선 변경 중 추적).
-OUTER_MEMORY_ADAPT_RATE = 0.5
-# 색 근거 없이 기억만으로 움직일 때 한 프레임 최대 이동량.
-OUTER_MEMORY_MAX_DRIFT_PX = 15
-# 색으로 다시 확인되지 않은 채 이 프레임 수가 지나면 기억을 버린다(자가 복구).
-OUTER_MEMORY_MAX_AGE_FRAMES = 90
-# 기억 근처에서 아무 덩어리도 이어지지 않은 프레임이 이만큼 쌓이면 기억을 버린다.
-OUTER_MEMORY_MAX_MISSES = 10
-################################################################
-
-
-######################## BEV/ROI 전처리 ########################
-# timed 노드와 같이 원본 영상 높이의 40%부터 최하단까지 BEV로
-# 펼친 뒤, BEV 전체를 추가 crop/사다리꼴 마스크 없이 탐색 ROI로 쓴다.
+######################## BEV/가로선 전처리 ########################
+# BEV(Bird's Eye View): 원본의 아래쪽 직사각형을 출력 사다리꼴로 워프한다.
 BEV_Y_TOP_RATIO = 0.4
 BEV_Y_BOTTOM_RATIO = 1.0
 BEV_TOP_WIDTH_RATIO = 1.0
 BEV_BOTTOM_WIDTH_RATIO = 0.7
+# 출력 폭은 기존 640px 좌표계와 맞추고, 높이 0이면 BEV 입력 ROI 비율로 계산한다.
 BEV_OUTPUT_WIDTH = 640
 BEV_OUTPUT_HEIGHT = 0
 
-# 차선보다 훨씬 긴 가로 성분(정지선/횡단보도)을 제거한다.
+# 횡단보도/정지선처럼 가로로 긴 흰색 영역 제거
+# 한 행에서 이 길이 이상 연속된 흰색 픽셀이 있으면 가로선으로 판단한다.
 HORIZONTAL_RUN_MIN_PX = 50
-HORIZONTAL_ERASE_HALF_BAND_PX = 3
+# 검출된 가로선 행을 기준으로 위/아래 이 픽셀 수만큼 흰색 마스크를 지운다.
+HORIZONTAL_ERASE_HALF_BAND_PX = 5
+################################################################
 
-# 흰색 과검출 검사에 쓰는 근접(BEV 하단) 밴드 높이
-NEAR_FIELD_ROWS = 100
-# 근접 밴드에서 흰색 비율이 이 값을 넘으면 횡단보도 등으로 판단하고 무시
-WHITE_OVERLOAD_RATIO = 0.15
+
+####################### 오른쪽 실선 색상 검증 #######################
+# 덩어리를 이 픽셀 수만큼 부풀린 이웃 영역에서 초록을 찾는다. 커브에서 실선과
+# 매트가 같은 x strip에 안 겹쳐도 잡히도록 고정 strip 대신 팽창을 쓴다.
+GREEN_NEAR_DISTANCE_PX = 20
+# 이웃 영역 안 초록 픽셀이 이 수 이상이어야 "매트 옆 실선"으로 인정한다.
+GREEN_MIN_PIXELS = 10
+# 초록이 덩어리보다 오른쪽에 있어야 한다(중앙 점선/왼쪽 실선 배제).
+# 이웃 초록의 평균 x가 덩어리 평균 x보다 이 값 이상 커야 한다.
+GREEN_RIGHT_MARGIN_PX = -1000
+################################################################
+
+
+######################## 흰색 덩어리 필터 ########################
+MIN_COMPONENT_AREA = 50      # 너무 작은 덩어리 제외
+MIN_LINE_HEIGHT_PX = 25       # 세로로 어느 정도 길어야 실선
+MIN_LINE_ASPECT_RATIO = 0.0   # 세로/가로 비. 동글동글한 꽃 그림 배제
+# 꽃처럼 작고 뭉툭한 흰색 객체만 제외한다. 큰 객체에는 적용하지 않으므로
+# 회전 구간의 긴 대각선 차선이 축 정렬 bbox상 넓어 보여도 제거되지 않는다.
+SMALL_COMPACT_MAX_AREA = 1800
+SMALL_COMPACT_MAX_SIDE_PX = 90
+SMALL_COMPACT_MIN_ELONGATION = 2.0
 ################################################################
 
 
 ######################## 차선/조향 기준 ########################
-# 시작 차선은 이 노드에서 정하지 않는다. mission_lane_main_node가 발행하는
-# /lane_info를 단일 기준으로 사용한다.
-# 640px BEV에서 차가 정상 위치일 때 보이는 중앙 점선의 x좌표.
-# 1차선은 화면 오른쪽 점선, 2차선은 화면 왼쪽 점선을 각각 기준으로 삼는다.
-DASHED_REFERENCE_X_PX_2LANE = 190
-DASHED_REFERENCE_X_PX_1LANE = 510
-# 기준선과 이만큼 차이 나면 lane_offset의 최대/최소값(+/-45)에 도달한다.
-OFFSET_ERROR_LIMIT_PX = 195
+# 차가 정상 위치일 때 오른쪽 실선이 있어야 할 BEV 화면 x.
+# 기존 카메라 좌표 보정값을 유지한 값이므로, BEV 적용 후에는 디버그 화면의
+# right_x를 보고 다시 조정해야 한다.
+TARGET_RIGHT_X = 540
+# 초록 매트 검증을 통과한 오른쪽 실선이 이 프레임 수만큼 연속으로 보일 때만
+# 중앙선 fallback에서 오른쪽 실선 제어로 복귀한다.
+RIGHT_GREEN_STABLE_FRAMES = 10
+# 오른쪽 실선이 안 보일 때 중앙 점선이 있어야 할 BEV 화면 x. 기본값은
+# TARGET_RIGHT_X - 차선 폭(약 190px)이며, 실제 BEV 디버그 화면에서 조정한다.
+TARGET_CENTER_X = 108
+# 중앙 점선 후보는 이 범위 안에서만 고른다. 초록 검증이 사라진 오른쪽 실선을
+# 중앙선으로 오인하지 않도록 탐색 폭을 제한한다.
+CENTER_SEARCH_HALF_WIDTH_PX = 150
+# 중앙선 fallback에서 한 프레임에 이보다 크게 x가 바뀌면 다른 흰색 물체를
+# 중앙선으로 오인한 것으로 보고 해당 측정을 버린다.
+CENTER_MAX_X_JUMP_PX = 35
+# 중앙선 위치는 정상 범위 안에서도 점선 조각 선택에 따라 조금씩 흔들릴 수 있다.
+# 중앙선 fallback일 때만 offset을 한 프레임에 이 값 이상 바꾸지 않는다.
+CENTER_MAX_OFFSET_STEP = 8
+# 중앙 점선 폴백 추적 설정. 점선 조각 사이의 공백을 건너며 아래/위 조각을 모두
+# 같은 트랙으로 묶기 위한 슬라이딩 윈도우 값이다.
+CENTER_NUM_WINDOWS = 15
+CENTER_WINDOW_MARGIN_PX = 160
+CENTER_WINDOW_MIN_COMPONENT_PIXELS = 30
+CENTER_RECONNECT_HEIGHT_PX = 15
+CENTER_MAX_TRACKED_PIECES = 4
+CENTER_MAX_VERTICAL_OVERLAP_RATIO = 0.20
+# 조향에 쓰는 x는 BEV 바닥에서 이 픽셀 수 이내(차량과 가장 가까운 구간)의
+# 실선 픽셀만 사용한다. 커브에서 먼 쪽 곡률에 끌려가지 않게 하는 핵심 값.
+NEAR_ROWS = 80
+# 근접 밴드에서 이 수 이상 픽셀이 있어야 측정을 신뢰한다.
+NEAR_MIN_PIXELS = 20
+# 근접 밴드가 비면(실선이 화면 위쪽에서만 보임) 덩어리 자체의 아래쪽
+# NEAR_ROWS 행을 대신 쓴다. True면 폴백 허용.
+ALLOW_LINE_BOTTOM_FALLBACK = True
+
+# 기준선과 이만큼 차이 나면 lane_offset 최대/최소(+/-45)에 도달한다.
+OFFSET_ERROR_LIMIT_PX = 130
 LANE_OFFSET_LIMIT = 45
-# 한 프레임 사이 offset이 이 값보다 더 튀면 오검출로 보고 이전 값 유지
-MAX_OFFSET_JUMP_PX = 80
-# 중앙 점선 미검출 시 현재 차선 안쪽으로 꺾는 offset 누적량.
-# 2차선은 좌회전(-), 1차선은 우회전(+) 방향이다.
-NO_DASH_RECOVERY_STEP = 3
-# 차로 전환 시 조향 기준을 한 프레임에 이동시킬 최대 픽셀 수. 검출 시작점은
-# 이 값과 무관하게 기존에 추적하던 물리적 중앙선 위치를 계속 사용한다.
-LANE_REFERENCE_TRANSITION_STEP_PX = 5.0
-
-# 색상 경계 실선 주행 기준. 2차선은 timed 노드의 오른쪽 실선
-# 기준을 공유하고, 1차선 왼쪽 실선 기준은 임시로 100px을 쓴다.
-SOLID_REFERENCE_X_PX_2LANE = 540
-SOLID_REFERENCE_X_PX_1LANE = 100
-# 2->1은 왼조향, 1->2는 우조향을 최대 offset으로 유지한다.
-LANE_CHANGE_STEER_OFFSET = 45
-# 색상 근거가 붙은 흰 실선 후보 필터와 근접 측정 영역.
-SOLID_MIN_COMPONENT_AREA = 50
-SOLID_MIN_LINE_HEIGHT_PX = 25
-SOLID_SMALL_COMPACT_MAX_AREA = 1800
-SOLID_SMALL_COMPACT_MAX_SIDE_PX = 90
-SOLID_SMALL_COMPACT_MIN_ELONGATION = 2.0
-SOLID_NEAR_ROWS = 80
-SOLID_NEAR_MIN_PIXELS = 20
-################################################################
-
-
-######################## 점선 추적/연결 ########################
-# 슬라이딩 윈도우. BEV 세로 방향 박스를 약 20px로 얇게 나눈다.
-NUM_WINDOWS = 15
-# 점선은 빈 구간을 넘어 다음 조각을 잡아야 하므로 실선보다 넓게 탐색한다.
-DASHED_WINDOW_MARGIN = 160
-WINDOW_MIN_COMPONENT_PIXELS = 30
-# 중앙 점선 성분 검증. 기준 x 주변에서 세로로 50px 이상 이어지는 흰 성분
-# 하나를 선택한다.
-DASH_MIN_VERTICAL_SPAN_PX = 50
-DASH_MIN_WIDTH_PX = 10
-DASH_MIN_AVERAGE_WIDTH_PX = 8.0
-DASH_MAX_AVERAGE_WIDTH_PX = 40.0
-DASH_MIN_COMPONENT_PIXELS = 80
-# 중앙선의 기준 조각은 위의 엄격한 조건으로 정하되, 그 조각과 같은 선상에 있는
-# 짧은 점선 조각도 시각화/추적 연결에 사용할 수 있도록 완화한 보조 조건.
-DASH_SUPPORT_MIN_VERTICAL_SPAN_PX = 15
-DASH_SUPPORT_MIN_COMPONENT_PIXELS = 60
-# ROI 높이 대부분을 계속 잇는 성분은 점선이 아니라 실선으로 본다.
-DASH_MAX_VERTICAL_SPAN_RATIO = 0.92
-# 서로 다른 높이에 나타나는 위/아래 점선 조각을 한 트랙으로 묶는다.
-DASH_MAX_TRACKED_PIECES = 4
-DASH_MAX_VERTICAL_OVERLAP_RATIO = 0.25
-# 같은 중앙선으로 선택된 인접 점선 조각 사이를 선으로 연결하는 조건.
-DASH_CONNECT_MAX_VERTICAL_GAP_PX = 200
-DASH_CONNECT_MAX_HORIZONTAL_GAP_PX = 100
-DASH_CONNECT_THICKNESS_PX = 8
-# 이전 프레임의 검출 위치를 다음 프레임 윈도우 시작점에 반영하는 비율.
-# 0.20이면 한 프레임에 차이의 20%만 움직여 급격한 점프를 막는다.
-WINDOW_START_ADAPT_RATE = 0.7
-# 새 검출 위치가 이전 박스 시작점에서 이 거리보다 크게 튀면 오검출로 보고
-# 시작점을 갱신하지 않는다.
-MAX_WINDOW_START_JUMP_PX = 180
+# 한 프레임 사이 offset이 이보다 크게 튀면 오검출로 보고 직전 값을 유지한다.
+MAX_OFFSET_JUMP = 2000
+# 발행 offset 저역통과(EMA) 계수. 1.0이면 필터 없음.
+OFFSET_SMOOTHING_ALPHA = 1.0
 ################################################################
 
 
 ######################## 디버그 시각화 ########################
-# 디버그 시각화: ROI/차선/슬라이딩 윈도우를 그린 화면을 바로 OpenCV 창으로 띄운다.
-# (bag/카메라 토픽만 켜져 있으면, 이 노드 실행만으로 인식 화면이 뜬다.)
-# 실차 대회 주행 시에는 CPU 절약을 위해 False로 끄는 것을 권장.
+# launch 파일에서 덮어쓰지 않고 이 노드의 상수로 디버그 창 여부를 결정한다.
 DEBUG_VIEW = True
 WINDOW_NAME = 'mission_lane_offset_debug'
 WHITE_MASK_WINDOW_NAME = 'mission_lane_offset_white_mask'
-CONNECTED_DASH_WINDOW_NAME = 'mission_lane_offset_connected_dash'
-DEBUG_IMAGE_TOPIC = '/lane_offset/debug_image'
+GREEN_MASK_WINDOW_NAME = 'mission_lane_offset_boundary_mask'
 ################################################################
 
 
 def class_mask(hsv, ycrcb, color_class):
-    """light_gray는 YCrCb만, 나머지 색은 설정된 색 공간을 쓴다."""
-    ycrcb_range = color_class['ycrcb']
-    if color_class['name'] == 'light_gray':
-        y_lo, y_hi = ycrcb_range['y']
-        cr_lo, cr_hi = ycrcb_range['cr']
-        cb_lo, cb_hi = ycrcb_range['cb']
-        return cv2.inRange(
-            ycrcb, (y_lo, cr_lo, cb_lo), (y_hi, cr_hi, cb_hi)
-        )
-
+    """흰색은 HSV만, 나머지 색은 설정된 HSV/YCrCb 교집합을 사용한다."""
     h_lo, h_hi = color_class['hsv']['h']
     s_lo, s_hi = color_class['hsv']['s']
     v_lo, v_hi = color_class['hsv']['v']
     mask = cv2.inRange(hsv, (h_lo, s_lo, v_lo), (h_hi, s_hi, v_hi))
 
+    if color_class['name'] == 'white':
+        return mask
+
+    ycrcb_range = color_class['ycrcb']
     if ycrcb_range is not None:
         y_lo, y_hi = ycrcb_range['y']
         cr_lo, cr_hi = ycrcb_range['cr']
@@ -191,35 +183,23 @@ def class_mask(hsv, ycrcb, color_class):
 
 
 class MissionLaneOffsetNode(Node):
-    """/camera/high/image_raw -> 색상 경계 실선 기준 /lane_offset 발행."""
+    """오른쪽 실선을 기준 x에 맞추는 조향 offset 발행 노드."""
 
     def __init__(self):
         super().__init__('mission_lane_offset_node')
 
-        color_classes, self.color_profile_name, profile_path = load_color_classes([
-            {'name': 'white', 'color_bgr': (255, 255, 255)},
-            {
-                'name': 'green',
-                'side': 'right',
-                'color_bgr': (0, 255, 0),
-            },
-            {
-                'name': 'light_gray',
-                'side': 'left',
-                'color_bgr': (211, 211, 211),
-            },
-        ])
-        self.color_classes = [
-            item for item in color_classes if item['name'] == 'white'
-        ]
-        self.outer_color_classes = [
-            item for item in color_classes if item['name'] != 'white'
-        ]
+        self.color_classes, self.color_profile_name, profile_path = (
+            load_color_classes([
+                {'name': 'white', 'color_bgr': (255, 255, 255)},
+                {'name': 'light_gray', 'color_bgr': (211, 211, 211)},
+                {'name': 'dark_gray', 'color_bgr': (105, 105, 105)},
+                {'name': 'green', 'color_bgr': (0, 255, 0)},
+            ])
+        )
         self.get_logger().info(
             f'Color profile={self.color_profile_name} ({profile_path})'
         )
 
-        # ---- 파라미터 ------------------------------------------------------
         self.declare_parameter('bev_y_top_ratio', BEV_Y_TOP_RATIO)
         self.declare_parameter('bev_y_bottom_ratio', BEV_Y_BOTTOM_RATIO)
         self.declare_parameter('bev_top_width_ratio', BEV_TOP_WIDTH_RATIO)
@@ -230,306 +210,74 @@ class MissionLaneOffsetNode(Node):
         self.declare_parameter(
             'horizontal_erase_half_band_px', HORIZONTAL_ERASE_HALF_BAND_PX
         )
-        self.declare_parameter('near_field_rows', NEAR_FIELD_ROWS)
-        self.declare_parameter('white_overload_ratio', WHITE_OVERLOAD_RATIO)
-        self.declare_parameter('outer_near_distance_px', OUTER_NEAR_DISTANCE_PX)
-        self.declare_parameter('outer_min_pixels', OUTER_MIN_PIXELS)
-        self.declare_parameter('outer_side_margin_px', OUTER_SIDE_MARGIN_PX)
-        self.declare_parameter('outer_halo_margin_px', OUTER_HALO_MARGIN_PX)
+        self.declare_parameter('green_near_distance_px', GREEN_NEAR_DISTANCE_PX)
+        self.declare_parameter('green_min_pixels', GREEN_MIN_PIXELS)
+        self.declare_parameter('green_right_margin_px', GREEN_RIGHT_MARGIN_PX)
+        self.declare_parameter('min_component_area', MIN_COMPONENT_AREA)
+        self.declare_parameter('min_line_height_px', MIN_LINE_HEIGHT_PX)
+        self.declare_parameter('min_line_aspect_ratio', MIN_LINE_ASPECT_RATIO)
         self.declare_parameter(
-            'outer_min_component_pixels', OUTER_MIN_COMPONENT_PIXELS
+            'small_compact_max_area', SMALL_COMPACT_MAX_AREA
         )
         self.declare_parameter(
-            'outer_min_vertical_span_ratio', OUTER_MIN_VERTICAL_SPAN_RATIO
+            'small_compact_max_side_px', SMALL_COMPACT_MAX_SIDE_PX
         )
         self.declare_parameter(
-            'outer_memory_tolerance_px', OUTER_MEMORY_TOLERANCE_PX
+            'small_compact_min_elongation', SMALL_COMPACT_MIN_ELONGATION
         )
-        self.declare_parameter('outer_memory_adapt_rate', OUTER_MEMORY_ADAPT_RATE)
+        self.declare_parameter('target_right_x', TARGET_RIGHT_X)
         self.declare_parameter(
-            'outer_memory_max_drift_px', OUTER_MEMORY_MAX_DRIFT_PX
+            'right_green_stable_frames', RIGHT_GREEN_STABLE_FRAMES
+        )
+        self.declare_parameter('target_center_x', TARGET_CENTER_X)
+        self.declare_parameter(
+            'center_search_half_width_px', CENTER_SEARCH_HALF_WIDTH_PX
+        )
+        self.declare_parameter('center_max_x_jump_px', CENTER_MAX_X_JUMP_PX)
+        self.declare_parameter('center_max_offset_step', CENTER_MAX_OFFSET_STEP)
+        self.declare_parameter('center_num_windows', CENTER_NUM_WINDOWS)
+        self.declare_parameter(
+            'center_window_margin_px', CENTER_WINDOW_MARGIN_PX
         )
         self.declare_parameter(
-            'outer_memory_max_age_frames', OUTER_MEMORY_MAX_AGE_FRAMES
+            'center_window_min_component_pixels',
+            CENTER_WINDOW_MIN_COMPONENT_PIXELS,
         )
-        self.declare_parameter('outer_memory_max_misses', OUTER_MEMORY_MAX_MISSES)
-        self.declare_parameter('dashed_reference_x_px_2lane', DASHED_REFERENCE_X_PX_2LANE)
-        self.declare_parameter('dashed_reference_x_px_1lane', DASHED_REFERENCE_X_PX_1LANE)
+        self.declare_parameter(
+            'center_reconnect_height_px', CENTER_RECONNECT_HEIGHT_PX
+        )
+        self.declare_parameter(
+            'center_max_tracked_pieces', CENTER_MAX_TRACKED_PIECES
+        )
+        self.declare_parameter(
+            'center_max_vertical_overlap_ratio',
+            CENTER_MAX_VERTICAL_OVERLAP_RATIO,
+        )
+        self.declare_parameter('near_rows', NEAR_ROWS)
+        self.declare_parameter('near_min_pixels', NEAR_MIN_PIXELS)
+        self.declare_parameter(
+            'allow_line_bottom_fallback', ALLOW_LINE_BOTTOM_FALLBACK
+        )
         self.declare_parameter('offset_error_limit_px', OFFSET_ERROR_LIMIT_PX)
         self.declare_parameter('lane_offset_limit', LANE_OFFSET_LIMIT)
-        self.declare_parameter('max_offset_jump_px', MAX_OFFSET_JUMP_PX)
-        self.declare_parameter(
-            'lane_reference_transition_step_px',
-            LANE_REFERENCE_TRANSITION_STEP_PX,
-        )
-        self.declare_parameter('num_windows', NUM_WINDOWS)
-        self.declare_parameter('dashed_window_margin', DASHED_WINDOW_MARGIN)
-        self.declare_parameter(
-            'dash_min_vertical_span_px', DASH_MIN_VERTICAL_SPAN_PX
-        )
-        self.declare_parameter('dash_min_width_px', DASH_MIN_WIDTH_PX)
-        self.declare_parameter(
-            'dash_min_average_width_px', DASH_MIN_AVERAGE_WIDTH_PX
-        )
-        self.declare_parameter(
-            'dash_max_average_width_px', DASH_MAX_AVERAGE_WIDTH_PX
-        )
-        self.declare_parameter(
-            'dash_min_component_pixels', DASH_MIN_COMPONENT_PIXELS
-        )
-        self.declare_parameter(
-            'dash_support_min_vertical_span_px',
-            DASH_SUPPORT_MIN_VERTICAL_SPAN_PX,
-        )
-        self.declare_parameter(
-            'dash_support_min_component_pixels',
-            DASH_SUPPORT_MIN_COMPONENT_PIXELS,
-        )
-        self.declare_parameter(
-            'dash_max_vertical_span_ratio', DASH_MAX_VERTICAL_SPAN_RATIO
-        )
-        self.declare_parameter(
-            'dash_max_tracked_pieces', DASH_MAX_TRACKED_PIECES
-        )
-        self.declare_parameter(
-            'dash_max_vertical_overlap_ratio',
-            DASH_MAX_VERTICAL_OVERLAP_RATIO,
-        )
-        self.declare_parameter(
-            'dash_connect_max_vertical_gap_px',
-            DASH_CONNECT_MAX_VERTICAL_GAP_PX,
-        )
-        self.declare_parameter(
-            'dash_connect_max_horizontal_gap_px',
-            DASH_CONNECT_MAX_HORIZONTAL_GAP_PX,
-        )
-        self.declare_parameter(
-            'dash_connect_thickness_px', DASH_CONNECT_THICKNESS_PX
-        )
-        self.declare_parameter('window_min_component_pixels', WINDOW_MIN_COMPONENT_PIXELS)
-        self.declare_parameter('window_start_adapt_rate', WINDOW_START_ADAPT_RATE)
-        self.declare_parameter('max_window_start_jump_px', MAX_WINDOW_START_JUMP_PX)
-        self.declare_parameter(
-            'solid_reference_x_px_2lane', SOLID_REFERENCE_X_PX_2LANE
-        )
-        self.declare_parameter(
-            'solid_reference_x_px_1lane', SOLID_REFERENCE_X_PX_1LANE
-        )
-        self.declare_parameter(
-            'lane_change_steer_offset', LANE_CHANGE_STEER_OFFSET
-        )
+        self.declare_parameter('max_offset_jump', MAX_OFFSET_JUMP)
+        self.declare_parameter('offset_smoothing_alpha', OFFSET_SMOOTHING_ALPHA)
         self.declare_parameter('debug_view', DEBUG_VIEW)
-
-        self.bev_y_top_ratio = float(np.clip(
-            self.get_parameter('bev_y_top_ratio').value, 0.0, 1.0
-        ))
-        self.bev_y_bottom_ratio = float(np.clip(
-            self.get_parameter('bev_y_bottom_ratio').value,
-            self.bev_y_top_ratio,
-            1.0,
-        ))
-        self.bev_top_width_ratio = float(np.clip(
-            self.get_parameter('bev_top_width_ratio').value, 0.0, 1.0
-        ))
-        self.bev_bottom_width_ratio = float(np.clip(
-            self.get_parameter('bev_bottom_width_ratio').value, 0.0, 1.0
-        ))
-        self.bev_output_width = max(
-            1, int(self.get_parameter('bev_output_width').value)
-        )
-        self.bev_output_height = max(
-            0, int(self.get_parameter('bev_output_height').value)
-        )
-        self.horizontal_run_min_px = max(
-            1, int(self.get_parameter('horizontal_run_min_px').value)
-        )
-        self.horizontal_erase_half_band_px = max(
-            0, int(self.get_parameter('horizontal_erase_half_band_px').value)
-        )
 
         self.image_topic = IMAGE_TOPIC
         self.lane_offset_topic = LANE_OFFSET_TOPIC
-        self.near_field_rows = int(self.get_parameter('near_field_rows').value)
-        self.white_overload_ratio = float(
-            self.get_parameter('white_overload_ratio').value
-        )
-        self.outer_near_distance_px = max(
-            1, int(self.get_parameter('outer_near_distance_px').value)
-        )
-        self.outer_min_pixels = max(
-            1, int(self.get_parameter('outer_min_pixels').value)
-        )
-        self.outer_side_margin_px = max(
-            0, int(self.get_parameter('outer_side_margin_px').value)
-        )
-        self.outer_halo_margin_px = max(
-            0, int(self.get_parameter('outer_halo_margin_px').value)
-        )
-        self.outer_min_component_pixels = max(
-            1, int(self.get_parameter('outer_min_component_pixels').value)
-        )
-        self.outer_min_vertical_span_ratio = float(np.clip(
-            self.get_parameter('outer_min_vertical_span_ratio').value,
-            0.0,
-            1.0,
-        ))
-        self.outer_memory_tolerance_px = max(
-            0.0, float(self.get_parameter('outer_memory_tolerance_px').value)
-        )
-        self.outer_memory_adapt_rate = float(np.clip(
-            self.get_parameter('outer_memory_adapt_rate').value, 0.0, 1.0
-        ))
-        self.outer_memory_max_drift_px = max(
-            0.0, float(self.get_parameter('outer_memory_max_drift_px').value)
-        )
-        self.outer_memory_max_age_frames = max(
-            1, int(self.get_parameter('outer_memory_max_age_frames').value)
-        )
-        self.outer_memory_max_misses = max(
-            1, int(self.get_parameter('outer_memory_max_misses').value)
-        )
-        self.dashed_reference_x_px_2lane = int(
-            self.get_parameter('dashed_reference_x_px_2lane').value
-        )
-        self.dashed_reference_x_px_1lane = int(
-            self.get_parameter('dashed_reference_x_px_1lane').value
-        )
-        self.driving_mode = None
-        self.dashed_reference_x_px = None
-        self.dashed_reference_target_x_px = None
-        self.lane_reference_transition_active = False
-        self.offset_error_limit_px = max(
-            1, int(self.get_parameter('offset_error_limit_px').value)
-        )
-        self.lane_offset_limit = max(
-            1, int(self.get_parameter('lane_offset_limit').value)
-        )
-        self.max_offset_jump_px = int(
-            self.get_parameter('max_offset_jump_px').value
-        )
-        self.lane_reference_transition_step_px = max(
-            0.1,
-            float(
-                self.get_parameter(
-                    'lane_reference_transition_step_px'
-                ).value
-            ),
-        )
-        self.num_windows = int(self.get_parameter('num_windows').value)
-        self.dashed_window_margin = int(
-            self.get_parameter('dashed_window_margin').value
-        )
-        self.dash_min_vertical_span_px = max(
-            1, int(self.get_parameter('dash_min_vertical_span_px').value)
-        )
-        self.dash_min_width_px = max(
-            1, int(self.get_parameter('dash_min_width_px').value)
-        )
-        self.dash_min_average_width_px = max(
-            0.0, float(self.get_parameter('dash_min_average_width_px').value)
-        )
-        self.dash_max_average_width_px = max(
-            self.dash_min_average_width_px,
-            float(self.get_parameter('dash_max_average_width_px').value),
-        )
-        self.dash_min_component_pixels = max(
-            1, int(self.get_parameter('dash_min_component_pixels').value)
-        )
-        self.dash_support_min_vertical_span_px = max(
-            1,
-            int(
-                self.get_parameter(
-                    'dash_support_min_vertical_span_px'
-                ).value
-            ),
-        )
-        self.dash_support_min_component_pixels = max(
-            1,
-            int(
-                self.get_parameter(
-                    'dash_support_min_component_pixels'
-                ).value
-            ),
-        )
-        self.dash_max_vertical_span_ratio = float(np.clip(
-            self.get_parameter('dash_max_vertical_span_ratio').value,
-            0.0,
-            1.0,
-        ))
-        self.dash_max_tracked_pieces = max(
-            1, int(self.get_parameter('dash_max_tracked_pieces').value)
-        )
-        self.dash_max_vertical_overlap_ratio = float(np.clip(
-            self.get_parameter('dash_max_vertical_overlap_ratio').value,
-            0.0,
-            1.0,
-        ))
-        self.dash_connect_max_vertical_gap_px = max(
-            0,
-            int(
-                self.get_parameter(
-                    'dash_connect_max_vertical_gap_px'
-                ).value
-            ),
-        )
-        self.dash_connect_max_horizontal_gap_px = max(
-            0,
-            int(
-                self.get_parameter(
-                    'dash_connect_max_horizontal_gap_px'
-                ).value
-            ),
-        )
-        self.dash_connect_thickness_px = max(
-            1, int(self.get_parameter('dash_connect_thickness_px').value)
-        )
-        self.window_min_component_pixels = int(
-            self.get_parameter('window_min_component_pixels').value
-        )
-        self.window_start_adapt_rate = float(np.clip(
-            self.get_parameter('window_start_adapt_rate').value, 0.0, 1.0
-        ))
-        self.max_window_start_jump_px = max(0, int(
-            self.get_parameter('max_window_start_jump_px').value
-        ))
-        self.solid_reference_x = {
-            '2lane': int(self.get_parameter('solid_reference_x_px_2lane').value),
-            '1lane': int(self.get_parameter('solid_reference_x_px_1lane').value),
-        }
-        self.lane_change_steer_offset = max(
-            1, int(self.get_parameter('lane_change_steer_offset').value)
-        )
-        self.debug_view = bool(self.get_parameter('debug_view').value)
-        self.window_name = WINDOW_NAME
-        self.white_mask_window_name = WHITE_MASK_WINDOW_NAME
-        self.connected_dash_window_name = CONNECTED_DASH_WINDOW_NAME
-        self.publish_debug_image = False
         self.debug_image_topic = DEBUG_IMAGE_TOPIC
+        self._load_parameters(lambda name: self.get_parameter(name).value)
 
-        # 마지막으로 발행한(유효했던) offset. 오검출 프레임에서는 이 값을 그대로 재사용.
-        self.last_offset = 0
-        # 다음 프레임의 중앙 점선 슬라이딩 윈도우 시작점.
-        self.window_start_x = {'dashed': None}
-        # 마지막으로 유효했던 중앙 점선 슬라이딩 윈도우. 인식 공백에서도 디버그
-        # 박스가 사라지지 않도록 유지한다.
-        self.last_lane_tracks = None
-        # 바깥 실선(왼쪽/오른쪽)으로 판정한 x 기억. 초록/회색이 사라져도 그 근처
-        # 덩어리를 중앙 점선으로 오인하지 않도록 유지한다.
-        # {'left'|'right': {'x': float, 'age': int, 'misses': int} 또는 None}
-        self.outer_memory = {
-            color_class['side']: None for color_class in self.outer_color_classes
-        }
-        # 이번 프레임에 바깥 실선으로 제외한 덩어리 박스(디버그 표시용).
-        self.last_outer_boxes = []
-        # 이번 프레임에서 같은 중앙선으로 이어 붙인 점선 조각의 끝점 쌍.
-        self.last_dashed_connections = []
-        self.last_connected_dashed_mask = None
-        # /lane_info 변경을 받은 뒤 목표 실선을 처음 볼 때까지 유지할
-        # 차선 변경 상태. 각 방향의 횟수 제한은 mission_lane_main이 담당한다.
-        self.lane_change_state = None
-        self.last_solid_line_x = {'left': None, 'right': None}
-        self.active_solid_side = None
-        self.active_solid_mask = None
+        # 런타임 상태
+        self.last_offset = 0.0
+        self.last_line_x = None          # 직전 프레임의 오른쪽 실선 측정 x
+        self.last_center_line_x = None   # 직전 프레임의 중앙 점선 측정 x
+        # 실제로 offset을 계산한 기준선. 오른쪽/중앙선의 추적 상태를 완전히
+        # 분리하고, 기준선 전환 순간에는 새 기준선을 첫 관측으로 취급한다.
+        self.active_control_line_kind = None
+        self.right_green_stable_count = 0
+        self.publish_debug_image = True
 
         qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -537,19 +285,138 @@ class MissionLaneOffsetNode(Node):
             reliability=ReliabilityPolicy.BEST_EFFORT,
         )
         self.offset_pub = self.create_publisher(Int16, self.lane_offset_topic, 10)
-        self.lane_change_complete_pub = self.create_publisher(
-            Int16, LANE_CHANGE_COMPLETE_TOPIC, 10
-        )
         self.debug_pub = self.create_publisher(Image, self.debug_image_topic, qos)
-        self.create_subscription(Int16, LANE_INFO_TOPIC, self.lane_info_callback, 10)
         self.create_subscription(Image, self.image_topic, self.image_callback, qos)
+        self.add_on_set_parameters_callback(self._on_set_parameters)
 
         self.get_logger().info(
             f'Subscribing {self.image_topic}, publishing {self.lane_offset_topic}, '
-            f'waiting for {LANE_INFO_TOPIC} to select the starting lane, '
-            f'debug_view={self.debug_view}, '
-            f'offset range=+/-{self.lane_offset_limit}'
+            f'target_right_x={self.target_right_x}, '
+            f'target_center_x={self.target_center_x}, near_rows={self.near_rows}, '
+            f'bev_y=({self.bev_y_top_ratio},{self.bev_y_bottom_ratio}), '
+            f'bev_bottom_width={self.bev_bottom_width_ratio}, '
+            f'debug_view={self.debug_view}'
         )
+
+        # 미션 전용 파라미터/상태. 위 차선 파라미터는 시간주행 복사본과 동일하다.
+        self.declare_parameter('target_left_x', TARGET_LEFT_X)
+        self.declare_parameter('target_center_x_1lane', TARGET_CENTER_X_1LANE)
+        self.declare_parameter('lane_change_steer_offset', LANE_CHANGE_STEER_OFFSET)
+        self.target_left_x = int(self.get_parameter('target_left_x').value)
+        self.target_center_x_1lane = int(
+            self.get_parameter('target_center_x_1lane').value
+        )
+        self.lane_change_steer_offset = max(
+            1, int(self.get_parameter('lane_change_steer_offset').value)
+        )
+        self.driving_mode = None
+        self.lane_change_state = None
+        self.lane_change_complete_pub = self.create_publisher(
+            Int16, LANE_CHANGE_COMPLETE_TOPIC, 10
+        )
+        self.create_subscription(Int16, LANE_INFO_TOPIC, self.lane_info_callback, 10)
+        self.get_logger().info(
+            f'Waiting for {LANE_INFO_TOPIC}; lane 2 targets right_x={self.target_right_x}, '
+            f'lane 1 targets left_x={self.target_left_x}'
+        )
+
+    # ======================================================================
+    # 파라미터
+    # ======================================================================
+    def _load_parameters(self, get):
+        self.bev_y_top_ratio = float(np.clip(get('bev_y_top_ratio'), 0.0, 1.0))
+        self.bev_y_bottom_ratio = float(
+            np.clip(get('bev_y_bottom_ratio'), self.bev_y_top_ratio, 1.0)
+        )
+        self.bev_top_width_ratio = float(
+            np.clip(get('bev_top_width_ratio'), 0.0, 1.0)
+        )
+        self.bev_bottom_width_ratio = float(
+            np.clip(get('bev_bottom_width_ratio'), 0.0, 1.0)
+        )
+        self.bev_output_width = max(1, int(get('bev_output_width')))
+        self.bev_output_height = max(0, int(get('bev_output_height')))
+        self.horizontal_run_min_px = max(1, int(get('horizontal_run_min_px')))
+        self.horizontal_erase_half_band_px = max(
+            0, int(get('horizontal_erase_half_band_px'))
+        )
+        self.green_near_distance_px = max(1, int(get('green_near_distance_px')))
+        self.green_min_pixels = int(get('green_min_pixels'))
+        self.green_right_margin_px = float(get('green_right_margin_px'))
+        self.min_component_area = int(get('min_component_area'))
+        self.min_line_height_px = int(get('min_line_height_px'))
+        self.min_line_aspect_ratio = float(get('min_line_aspect_ratio'))
+        self.small_compact_max_area = max(
+            0, int(get('small_compact_max_area'))
+        )
+        self.small_compact_max_side_px = max(
+            0, int(get('small_compact_max_side_px'))
+        )
+        self.small_compact_min_elongation = max(
+            1.0, float(get('small_compact_min_elongation'))
+        )
+        self.target_right_x = int(get('target_right_x'))
+        self.right_green_stable_frames = max(
+            1, int(get('right_green_stable_frames'))
+        )
+        self.target_center_x = int(get('target_center_x'))
+        self.center_search_half_width_px = max(
+            1, int(get('center_search_half_width_px'))
+        )
+        self.center_max_x_jump_px = max(
+            1, int(get('center_max_x_jump_px'))
+        )
+        self.center_max_offset_step = max(
+            1, int(get('center_max_offset_step'))
+        )
+        self.center_num_windows = max(1, int(get('center_num_windows')))
+        self.center_window_margin_px = max(
+            1, int(get('center_window_margin_px'))
+        )
+        self.center_window_min_component_pixels = max(
+            1, int(get('center_window_min_component_pixels'))
+        )
+        self.center_reconnect_height_px = max(
+            1, int(get('center_reconnect_height_px'))
+        )
+        self.center_max_tracked_pieces = max(
+            1, int(get('center_max_tracked_pieces'))
+        )
+        self.center_max_vertical_overlap_ratio = float(np.clip(
+            get('center_max_vertical_overlap_ratio'), 0.0, 1.0
+        ))
+        self.near_rows = max(1, int(get('near_rows')))
+        self.near_min_pixels = int(get('near_min_pixels'))
+        self.allow_line_bottom_fallback = bool(get('allow_line_bottom_fallback'))
+        self.offset_error_limit_px = max(1, int(get('offset_error_limit_px')))
+        self.lane_offset_limit = max(1, int(get('lane_offset_limit')))
+        self.max_offset_jump = int(get('max_offset_jump'))
+        self.offset_smoothing_alpha = float(
+            np.clip(get('offset_smoothing_alpha'), 0.0, 1.0)
+        )
+        self.debug_view = bool(get('debug_view'))
+
+    def _on_set_parameters(self, params):
+        incoming = {p.name: p.value for p in params}
+
+        def get(name):
+            return incoming[name] if name in incoming else self.get_parameter(name).value
+
+        try:
+            self._load_parameters(get)
+        except Exception as exc:  # noqa: BLE001 - 잘못된 값은 거부만, 노드는 유지
+            return SetParametersResult(successful=False, reason=str(exc))
+        for parameter in params:
+            if parameter.name == 'target_left_x':
+                self.target_left_x = int(parameter.value)
+            elif parameter.name == 'target_center_x_1lane':
+                self.target_center_x_1lane = int(parameter.value)
+            elif parameter.name == 'lane_change_steer_offset':
+                self.lane_change_steer_offset = max(1, int(parameter.value))
+        self.get_logger().info(
+            'Params updated live: ' + ', '.join(f'{p.name}={p.value}' for p in params)
+        )
+        return SetParametersResult(successful=True)
 
     # ======================================================================
     # 이미지 콜백
@@ -564,368 +431,321 @@ class MissionLaneOffsetNode(Node):
             return
         self.set_driving_mode(f'{lane_number}lane')
 
-    def set_driving_mode(self, mode, force=False):
-        """Detect /lane_info transitions and arm destination-line acquisition."""
-        mode = str(mode).lower()
-        if mode not in ('1lane', '2lane'):
+    def set_driving_mode(self, mode):
+        if mode not in ('1lane', '2lane') or mode == self.driving_mode:
             return
-        if not force and mode == self.driving_mode:
-            return
-        if self.lane_change_state is not None and mode != self.driving_mode:
+        if self.lane_change_state is not None:
             self.get_logger().warn(
-                f'Ignoring mode change to {mode}; '
-                f'lane change {self.lane_change_state} is still in progress',
+                f'Ignoring mode change to {mode}; lane change '
+                f'{self.lane_change_state} is still in progress',
                 throttle_duration_sec=1.0,
             )
             return
-
         previous_mode = self.driving_mode
         self.driving_mode = mode
-        reference_x = float(self.solid_reference_x[mode])
-        # 아래 기존 디버그/보조 함수가 참조하는 필드도 새 실선 기준으로 맞춘다.
-        self.dashed_reference_x_px = reference_x
-        self.dashed_reference_target_x_px = reference_x
-        self.lane_reference_transition_active = False
-
-        if previous_mode is None or force:
-            self.lane_change_state = None
-        elif previous_mode == '2lane' and mode == '1lane':
+        if previous_mode == '2lane' and mode == '1lane':
             self.lane_change_state = '2->1'
-            self.last_solid_line_x['left'] = None
         elif previous_mode == '1lane' and mode == '2lane':
             self.lane_change_state = '1->2'
-            self.last_solid_line_x['right'] = None
-
+        else:
+            self.lane_change_state = None
+        self.last_line_x = None
+        self.last_center_line_x = None
+        self.active_control_line_kind = None
+        self.right_green_stable_count = 0
         self.get_logger().info(
             f'Driving mode changed {previous_mode or "startup"} -> {mode}; '
-            f'solid_reference_x={reference_x:.1f}, '
             f'lane_change_state={self.lane_change_state or "tracking"}'
         )
 
-    def advance_lane_reference_transition(self):
-        """현재 조향 기준을 새 차로 목표 기준 쪽으로 한 단계 이동한다."""
-        if not self.lane_reference_transition_active:
-            return False
+    def lane_control_spec(self):
+        if self.driving_mode == '1lane':
+            return {
+                'side': 'left',
+                'color_name': 'light_gray',
+                'target_boundary_x': self.target_left_x,
+                'target_center_x': self.target_center_x_1lane,
+                'line_kind': 'LEFT',
+            }
+        return {
+            'side': 'right',
+            'color_name': 'green',
+            'target_boundary_x': self.target_right_x,
+            'target_center_x': self.target_center_x,
+            'line_kind': 'RIGHT',
+        }
 
-        delta = (
-            self.dashed_reference_target_x_px
-            - self.dashed_reference_x_px
-        )
-        step = self.lane_reference_transition_step_px
-        if abs(delta) <= step:
-            self.dashed_reference_x_px = self.dashed_reference_target_x_px
-            self.lane_reference_transition_active = False
-            self.get_logger().info(
-                f'Lane reference transition complete: '
-                f'{self.dashed_reference_x_px:.1f}'
+    def handle_lane_change_detection(
+        self, msg, bev, boundary_mask, boundary_x, boundary_mode, spec
+    ):
+        if self.lane_change_state is None:
+            return False
+        if boundary_x is None:
+            output = (
+                -self.lane_change_steer_offset
+                if self.lane_change_state == '2->1'
+                else self.lane_change_steer_offset
             )
-        else:
-            self.dashed_reference_x_px += math.copysign(step, delta)
-        return True
+            self.last_offset = float(np.clip(
+                output, -self.lane_offset_limit, self.lane_offset_limit
+            ))
+            self.publish_offset(self.last_offset)
+            self.publish_debug(
+                msg, bev, f'CHANGING {self.lane_change_state}',
+                boundary_mask, None, boundary_mode,
+                raw_offset=self.last_offset,
+                target_x=spec['target_boundary_x'],
+                line_kind=spec['line_kind'],
+            )
+            return True
+        completed_transition = self.lane_change_state
+        self.lane_change_state = None
+        complete_msg = Int16()
+        complete_msg.data = 1 if self.driving_mode == '1lane' else 2
+        self.lane_change_complete_pub.publish(complete_msg)
+        self.get_logger().info(
+            f'Lane change {completed_transition} complete: '
+            f'{spec["side"]} color-backed line acquired at x={boundary_x:.1f}'
+        )
+        return False
 
     def image_callback(self, msg):
-        # 시작 차선과 차선 변경 명령은 mission_lane_main의 /lane_info가
-        # 단일 기준이다. 신호등 색상 판정은 main 노드에서 독립적으로 수행된다.
         if self.driving_mode is None:
             self.get_logger().info(
                 f'Waiting for {LANE_INFO_TOPIC}; skipping image',
                 throttle_duration_sec=1.0,
             )
             return
-
         frame = self.to_bgr(msg)
         if frame is None:
             return
 
         segmented = self.segment_colors(frame)
-        frame = self.warp_to_bev(segmented)
-        if frame.size == 0:
+        bev = self.warp_to_bev(segmented)
+        white_mask = self.make_white_mask(bev)
+        spec = self.lane_control_spec()
+        boundary_mask = self.make_class_color_mask(bev, spec['color_name'])
+        self.show_mask_windows(white_mask, boundary_mask)
+
+        primary_mask, primary_x, primary_mode, primary_reason = (
+            self.find_boundary_solid_line(
+                white_mask, boundary_mask, spec['side']
+            )
+        )
+        if self.handle_lane_change_detection(
+            msg, bev, primary_mask, primary_x, primary_mode, spec
+        ):
             return
 
-        # timed 노드와 동일하게 BEV 전체를 바로 마스크로 만든다.
-        white_mask = self.make_white_mask(frame)
-        outer_masks = self.make_outer_masks(frame)
-        self.show_debug_mask(white_mask, outer_masks)
+        if primary_x is None:
+            self.right_green_stable_count = 0
+        else:
+            self.right_green_stable_count = min(
+                self.right_green_stable_count + 1,
+                self.right_green_stable_frames,
+            )
 
-        near = white_mask[-self.near_field_rows:, :]
-        near_white_ratio = float((near > 0).mean()) if near.size else 0.0
+        target_x = spec['target_boundary_x']
+        line_kind = spec['line_kind']
+        line_mask = primary_mask
+        measured_x = primary_x
+        measure_mode = primary_mode
+        reject_reason = primary_reason
+        center_jump_rejected = False
 
-        side = 'left' if self.driving_mode == '1lane' else 'right'
-        color_mask = outer_masks.get(side)
-        line_mask, line_x, detect_reason = self.find_color_backed_solid_line(
-            white_mask,
-            color_mask,
-            side,
-            self.last_solid_line_x[side],
-        )
-        if near_white_ratio > self.white_overload_ratio:
-            line_mask, line_x = None, None
-            detect_reason = f'white overload {near_white_ratio:.2f}'
-
-        self.active_solid_side = side
-        self.active_solid_mask = line_mask
-        reference_x = float(self.solid_reference_x[self.driving_mode])
-
-        if line_x is None:
-            if self.lane_change_state == '2->1':
-                output = -self.lane_change_steer_offset
-                status = 'CHANGING 2->1: STEER LEFT'
-            elif self.lane_change_state == '1->2':
-                output = self.lane_change_steer_offset
-                status = 'CHANGING 1->2: STEER RIGHT'
+        if self.right_green_stable_count < self.right_green_stable_frames:
+            # 오른쪽 실선은 초록 매트가 연속 프레임에서 확인될 때만 제어권을
+            # 받는다. 그 전에는 중앙 점선을 계속 사용해 짧은 초록 오검출에
+            # 조향 기준이 바뀌지 않게 한다.
+            if self.active_control_line_kind != 'CENTER':
+                # 오른쪽 실선 주행 중 남아 있던 중앙선 좌표는 다음 중앙선 주행의
+                # 기준으로 쓰면 안 된다. 전환 프레임은 새 중앙선 트랙의 시작이다.
+                self.last_center_line_x = None
+            target_x = spec['target_center_x']
+            line_kind = 'CENTER'
+            measured_x = None
+            measure_mode = 'none'
+            center_mask, center_x, center_mode, center_reason = self.find_center_line(
+                white_mask, spec['target_center_x']
+            )
+            # 새 중앙선 후보가 점프 판정으로 버려져도, 디버그 화면에서는 왜
+            # 버렸는지 확인할 수 있도록 후보 마스크는 표시한다.
+            if center_mask is not None:
+                line_mask = center_mask
+            if (
+                center_x is not None
+                and self.last_center_line_x is not None
+                and abs(center_x - self.last_center_line_x)
+                > self.center_max_x_jump_px
+            ):
+                center_jump_rejected = True
+                center_reason = (
+                    f'center x jump {self.last_center_line_x:.1f} -> '
+                    f'{center_x:.1f} exceeds {self.center_max_x_jump_px}px'
+                )
+                center_x = None
+            if center_x is not None:
+                line_mask = center_mask
+                measured_x = center_x
+                measure_mode = center_mode
+                target_x = spec['target_center_x']
+                line_kind = 'CENTER'
+                if primary_x is not None:
+                    reject_reason = (
+                        f'right green stabilizing '
+                        f'({self.right_green_stable_count}/'
+                        f'{self.right_green_stable_frames})'
+                    )
+                self.get_logger().warn(
+                    f'Using center line fallback ({reject_reason})',
+                    throttle_duration_sec=1.0,
+                )
             else:
-                output = self.last_offset
-                status = f'NO {side.upper()} COLOR-BACKED LINE'
-            self.last_offset = int(np.clip(
-                output, -self.lane_offset_limit, self.lane_offset_limit
-            ))
-            self.publish_offset(self.last_offset)
+                reject_reason = f'{reject_reason}; center fallback: {center_reason}'
+
+        if measured_x is None:
+            # 중앙선도 잠깐 끊기거나, 오른쪽 실선의 10프레임 안정화가 아직 끝나지
+            # 않았으면 새 offset을 만들지 않고 직전 값을 그대로 유지한다.
             self.get_logger().warn(
-                f'{status}; {detect_reason}; offset={self.last_offset}',
+                f'No active lane line ({reject_reason}); holding last offset',
                 throttle_duration_sec=1.0,
             )
+            self.publish_offset(self.last_offset)
             self.publish_debug(
-                msg, frame, status, near_white_ratio,
-                base_x=reference_x, lane_offset=self.last_offset,
-                solid_mask=line_mask, solid_side=side,
+                msg, bev,
+                'CENTER JUMP HOLD' if center_jump_rejected else 'CENTER LOST HOLD',
+                line_mask, None, measure_mode,
+                target_x=target_x, line_kind=line_kind,
+                held_x=(
+                    self.last_center_line_x if line_kind == 'CENTER' else None
+                ),
             )
             return
 
-        transition_completed = self.lane_change_state is not None
-        if transition_completed:
-            completed_transition = self.lane_change_state
-            self.get_logger().info(
-                f'Lane change {completed_transition} complete: '
-                f'{side} color-backed white line acquired at x={line_x:.1f}'
-            )
-            self.lane_change_state = None
-            self.publish_lane_change_complete(
-                1 if self.driving_mode == '1lane' else 2
-            )
+        raw_offset = self.map_line_x_to_offset(measured_x, target_x)
+        center_step_limited = False
+        if line_kind == 'CENTER':
+            limited_offset = float(np.clip(
+                raw_offset,
+                self.last_offset - self.center_max_offset_step,
+                self.last_offset + self.center_max_offset_step,
+            ))
+            if limited_offset != raw_offset:
+                center_step_limited = True
+                self.get_logger().warn(
+                    f'Center offset step limited: {self.last_offset:.0f} -> '
+                    f'{raw_offset} (using {limited_offset:.0f})',
+                    throttle_duration_sec=1.0,
+                )
+                raw_offset = int(round(limited_offset))
 
-        lane_offset = self.map_solid_line_x_to_offset(line_x, reference_x)
-        if (
-            not transition_completed
-            and abs(lane_offset - self.last_offset) > self.max_offset_jump_px
-        ):
+        if abs(raw_offset - self.last_offset) > self.max_offset_jump:
             self.get_logger().warn(
-                f'Offset jump too large ({self.last_offset} -> {lane_offset}), '
+                f'Offset jump too large ({self.last_offset:.0f} -> {raw_offset}), '
                 'holding last offset',
                 throttle_duration_sec=1.0,
             )
             self.publish_offset(self.last_offset)
             self.publish_debug(
-                msg, frame, 'JUMP REJECTED', near_white_ratio,
-                base_x=reference_x, line_x=line_x, lane_offset=lane_offset,
-                solid_mask=line_mask, solid_side=side,
+                msg, bev, 'JUMP REJECTED', line_mask, measured_x, measure_mode,
+                raw_offset, target_x, line_kind,
             )
             return
 
-        self.last_offset = lane_offset
-        self.last_solid_line_x[side] = line_x
-        self.publish_offset(lane_offset)
+        self.last_offset = (
+            self.offset_smoothing_alpha * raw_offset
+            + (1.0 - self.offset_smoothing_alpha) * self.last_offset
+        )
+        if line_kind != 'CENTER':
+            self.last_line_x = measured_x
+            # 다음에 중앙선 fallback으로 들어가면, 과거 중앙선이 아닌 새 관측부터
+            # 중앙선 점프 제한을 시작한다.
+            self.last_center_line_x = None
+        else:
+            self.last_center_line_x = measured_x
+        self.active_control_line_kind = line_kind
+        self.publish_offset(self.last_offset)
         self.publish_debug(
-            msg, frame, 'OK', near_white_ratio,
-            base_x=reference_x, line_x=line_x, lane_offset=lane_offset,
-            solid_mask=line_mask, solid_side=side,
+            msg, bev,
+            (
+                'OK' if line_kind != 'CENTER'
+                else 'CENTER STEP LIMITED' if center_step_limited
+                else 'CENTER FALLBACK'
+            ),
+            line_mask, measured_x, measure_mode, raw_offset, target_x, line_kind,
         )
-
-    def publish_offset(self, value):
-        msg = Int16()
-        msg.data = int(np.clip(value, -self.lane_offset_limit, self.lane_offset_limit))
-        self.offset_pub.publish(msg)
-
-    def publish_lane_change_complete(self, lane_number):
-        msg = Int16()
-        msg.data = int(lane_number)
-        self.lane_change_complete_pub.publish(msg)
-
-    def apply_no_dash_recovery(self):
-        """중앙선 미검출 동안 차선별 복구 방향으로 offset을 누적한다."""
-        direction = -1 if self.driving_mode == '2lane' else 1
-        self.last_offset = int(np.clip(
-            self.last_offset + direction * NO_DASH_RECOVERY_STEP,
-            -self.lane_offset_limit,
-            self.lane_offset_limit,
-        ))
-        return self.last_offset
-
-    def map_solid_line_x_to_offset(self, detected_lane_x, reference_x):
-        """색상 경계 실선 오차를 -45~45 offset으로 매핑한다."""
-        error_px = float(detected_lane_x) - float(reference_x)
-        normalized = np.clip(
-            error_px / self.offset_error_limit_px,
-            -1.0,
-            1.0,
-        )
-        scaled_offset = normalized * self.lane_offset_limit
-        return int(round(np.clip(
-            scaled_offset, -self.lane_offset_limit, self.lane_offset_limit
-        )))
-
-    def find_color_backed_solid_line(
-        self, white_mask, color_mask, side, previous_x
-    ):
-        """Find a white solid line with gray on its left or green on its right."""
-        if color_mask is None or not np.any(color_mask):
-            return None, None, f'no {side} boundary color'
-
-        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
-            white_mask, connectivity=8
-        )
-        if num_labels <= 1:
-            return None, None, 'no white component'
-
-        pad = self.outer_near_distance_px
-        kernel_size = pad * 2 + 1
-        kernel = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE, (kernel_size, kernel_size)
-        )
-        height, width = white_mask.shape
-        best = None
-        shape_pass = 0
-
-        for label in range(1, num_labels):
-            x, y, w, h, area = stats[label]
-            if area < SOLID_MIN_COMPONENT_AREA or h < SOLID_MIN_LINE_HEIGHT_PX:
-                continue
-
-            component = labels == label
-            if (
-                area <= SOLID_SMALL_COMPACT_MAX_AREA
-                and max(w, h) <= SOLID_SMALL_COMPACT_MAX_SIDE_PX
-                and self.component_elongation(component)
-                < SOLID_SMALL_COMPACT_MIN_ELONGATION
-            ):
-                continue
-            shape_pass += 1
-
-            right = x + w - 1
-            bottom = y + h - 1
-            x0, x1 = max(0, x - pad), min(width, right + pad + 1)
-            y0, y1 = max(0, y - pad), min(height, bottom + pad + 1)
-            local_component = component[y0:y1, x0:x1].astype(np.uint8)
-            neighborhood = cv2.dilate(local_component, kernel)
-
-            if side == 'left':
-                band = slice(x0, max(x0, x - self.outer_side_margin_px))
-            else:
-                band = slice(
-                    min(x1, right + 1 + self.outer_side_margin_px), x1
-                )
-            if band.stop <= band.start:
-                continue
-
-            local_color = color_mask[y0:y1, band]
-            local_neighborhood = neighborhood[
-                :, band.start - x0:band.stop - x0
-            ]
-            near_color = cv2.bitwise_and(local_color, local_neighborhood)
-            if int(cv2.countNonZero(near_color)) < self.outer_min_pixels:
-                continue
-
-            component_x = float(centroids[label][0])
-            score = (
-                -abs(component_x - previous_x)
-                if previous_x is not None
-                else float(area)
-            )
-            if best is None or score > best[0]:
-                best = (score, label)
-
-        if best is None:
-            reason = (
-                f'no white line backed by {side} color'
-                if shape_pass
-                else 'no line-shaped white component'
-            )
-            return None, None, reason
-
-        line_mask = (labels == best[1]).astype(np.uint8) * 255
-        measured_x, measure_mode = self.measure_solid_near_x(line_mask)
-        if measured_x is None:
-            return line_mask, None, f'{measure_mode}: insufficient near pixels'
-        return line_mask, measured_x, measure_mode
-
-    @staticmethod
-    def component_elongation(component_mask):
-        ys, xs = np.nonzero(component_mask)
-        if len(xs) < 3:
-            return 1.0
-        points = np.column_stack((xs, ys)).astype(np.float32)
-        side_a, side_b = cv2.minAreaRect(points)[1]
-        long_side = max(float(side_a), float(side_b))
-        short_side = min(float(side_a), float(side_b))
-        return long_side if short_side < 1.0 else long_side / short_side
-
-    @staticmethod
-    def measure_solid_near_x(line_mask):
-        """Measure the median x from the vehicle-near part of a solid line."""
-        height = line_mask.shape[0]
-        ys, xs = np.nonzero(line_mask)
-        if ys.size == 0:
-            return None, 'empty line'
-
-        near = ys >= height - SOLID_NEAR_ROWS
-        if int(near.sum()) >= SOLID_NEAR_MIN_PIXELS:
-            return float(np.median(xs[near])), 'near band'
-
-        bottom = ys >= ys.max() - SOLID_NEAR_ROWS
-        if int(bottom.sum()) >= SOLID_NEAR_MIN_PIXELS:
-            return float(np.median(xs[bottom])), 'line bottom'
-        return None, 'near band empty'
 
     # ======================================================================
-    # 색상 마스크
+    # 마스크
     # ======================================================================
     def segment_colors(self, frame):
-        """원본을 흰색 + 도로 바깥 색으로 분류하고 나머지는 검정으로 만든다.
-
-        흰색을 마지막에 칠해 겹치는 화소는 항상 흰색이 이긴다. 바깥 색 추가가
-        기존 중앙 점선 검출 결과를 바꾸지 않게 하기 위한 순서다.
-        """
+        """입력을 5색 분류 이미지로 바꾼다. BEV는 이 결과에 적용한다."""
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         ycrcb = cv2.cvtColor(frame, cv2.COLOR_BGR2YCrCb)
         segmented = np.zeros_like(frame, dtype=np.uint8)
-        for color_class in self.outer_color_classes + self.color_classes:
+        for color_class in self.color_classes:
             mask = class_mask(hsv, ycrcb, color_class)
             segmented[mask > 0] = color_class['color_bgr']
         return segmented
 
-    def make_outer_masks(self, bev):
-        """BEV에서 도로 바깥 색 마스크를 side('left'/'right')별로 만든다.
+    def make_white_mask(self, segmented_bev):
+        white_mask = (
+            np.all(segmented_bev == (255, 255, 255), axis=2).astype(np.uint8) * 255
+        )
+        return self.remove_horizontal_white_bands(white_mask)
 
-        흰 선 가장자리 번짐(halo)은 제거한다. 밝은 흰 선의 테두리는 밝은 회색
-        범위에 쉽게 들어가서, 그대로 두면 중앙 점선이 자기 테두리를 근거로
-        "옆에 회색이 있다 = 왼쪽 바깥 실선"으로 오판된다.
-        """
-        white = cv2.inRange(bev, (255, 255, 255), (255, 255, 255))
-        if self.outer_halo_margin_px > 0:
-            kernel_size = self.outer_halo_margin_px * 2 + 1
-            halo = cv2.dilate(
-                white, np.ones((kernel_size, kernel_size), dtype=np.uint8)
-            )
-        else:
-            halo = np.zeros_like(white)
+    def remove_horizontal_white_bands(self, white_mask):
+        """50px 이상 연속된 가로 흰 선과 그 위아래 밴드를 마스크에서 지운다."""
+        height, width = white_mask.shape
+        min_run = self.horizontal_run_min_px
+        if width < min_run or height == 0:
+            return white_mask
 
-        masks = {}
-        for color_class in self.outer_color_classes:
-            color = color_class['color_bgr']
-            mask = cv2.inRange(bev, color, color)
-            if color_class['name'] == 'light_gray':
-                cutoff_x = int(round(mask.shape[1] * LIGHT_GRAY_MASK_MAX_X_RATIO))
-                mask[:, cutoff_x:] = 0
-            masks[color_class['side']] = cv2.bitwise_and(
-                mask, cv2.bitwise_not(halo)
-            )
-        return masks
+        # 각 행의 길이 min_run짜리 구간 합을 구한다. 합이 min_run이면 그 구간은
+        # 전부 흰색이므로 해당 행에 연속된 가로선이 있다고 판단할 수 있다.
+        binary = (white_mask > 0).astype(np.int32)
+        row_prefix = np.pad(
+            np.cumsum(binary, axis=1), ((0, 0), (1, 0)), mode='constant'
+        )
+        window_sums = row_prefix[:, min_run:] - row_prefix[:, :-min_run]
+        horizontal_rows = np.any(window_sums >= min_run, axis=1)
+        if not np.any(horizontal_rows):
+            return white_mask
 
+        # 검출 행마다 위/아래 half_band를 더한 행 전체를 0으로 만든다.
+        half_band = self.horizontal_erase_half_band_px
+        erase_rows = cv2.dilate(
+            horizontal_rows.astype(np.uint8).reshape(-1, 1),
+            np.ones((half_band * 2 + 1, 1), dtype=np.uint8),
+        ).reshape(-1) > 0
+
+        filtered = white_mask.copy()
+        filtered[erase_rows, :] = 0
+        return filtered
+
+    def make_class_color_mask(self, segmented_bev, color_name):
+        color = next(
+            item['color_bgr'] for item in self.color_classes
+            if item['name'] == color_name
+        )
+        return (
+            np.all(segmented_bev == color, axis=2).astype(np.uint8) * 255
+        )
+
+    def make_green_mask(self, segmented_bev):
+        """Compatibility wrapper for existing tests and callers."""
+        return self.make_class_color_mask(segmented_bev, 'green')
+
+    # ======================================================================
+    # BEV(Bird's Eye View)
+    # ======================================================================
     def warp_to_bev(self, segmented):
         output_height = self.compute_bev_output_height(segmented.shape)
         src_points, dst_points = self.compute_bev_points(
             segmented.shape, output_height
         )
         transform = cv2.getPerspectiveTransform(src_points, dst_points)
+        # 분류 색이 섞여 새 색으로 생기지 않도록 최근접 보간을 사용한다.
         return cv2.warpPerspective(
             segmented,
             transform,
@@ -936,13 +756,12 @@ class MissionLaneOffsetNode(Node):
     def compute_bev_output_height(self, frame_shape):
         if self.bev_output_height > 0:
             return self.bev_output_height
+
         height, width = frame_shape[:2]
         source_height = height * (
             self.bev_y_bottom_ratio - self.bev_y_top_ratio
         )
-        return max(
-            1, round(self.bev_output_width * source_height / width)
-        )
+        return max(1, round(self.bev_output_width * source_height / width))
 
     def compute_bev_points(self, frame_shape, output_height):
         height, width = frame_shape[:2]
@@ -956,9 +775,7 @@ class MissionLaneOffsetNode(Node):
         ])
 
         center_x = self.bev_output_width / 2.0
-        top_half_width = (
-            self.bev_output_width * self.bev_top_width_ratio / 2.0
-        )
+        top_half_width = self.bev_output_width * self.bev_top_width_ratio / 2.0
         bottom_half_width = (
             self.bev_output_width * self.bev_bottom_width_ratio / 2.0
         )
@@ -970,545 +787,413 @@ class MissionLaneOffsetNode(Node):
         ])
         return src_points, dst_points
 
-    def make_white_mask(self, segmented_bev):
-        """timed 노드와 같이 BEV 분류 결과의 정확한 흰색만 꺼낸다."""
-        white_mask = (
-            np.all(segmented_bev == (255, 255, 255), axis=2).astype(np.uint8)
-            * 255
-        )
-        return self.remove_horizontal_white_bands(white_mask)
-
-    def remove_horizontal_white_bands(self, white_mask):
-        height, width = white_mask.shape
-        min_run = self.horizontal_run_min_px
-        if height == 0 or width < min_run:
-            return white_mask
-
-        # 긴 가로선이 있는 "행 전체"를 지우면 같은 높이에 있는 중앙 점선까지
-        # 잘린다. 가로 opening으로 실제 정지선 픽셀의 x구간만 추출해 제거한다.
-        horizontal_kernel = cv2.getStructuringElement(
-            cv2.MORPH_RECT, (min_run, 1)
-        )
-        horizontal = cv2.morphologyEx(
-            white_mask, cv2.MORPH_OPEN, horizontal_kernel
-        )
-        if not np.any(horizontal):
-            return white_mask
-
-        half_band = self.horizontal_erase_half_band_px
-        if half_band > 0:
-            horizontal = cv2.dilate(
-                horizontal,
-                np.ones((half_band * 2 + 1, 1), dtype=np.uint8),
-            )
-        filtered = white_mask.copy()
-        filtered[horizontal > 0] = 0
-        return filtered
-
-    def show_debug_mask(self, white_mask, outer_masks=None):
-        """흰색 마스크와 도로 바깥 색 마스크를 한 디버그 창에 겹쳐 표시한다."""
-        if not self.debug_view:
-            return
-
-        white_debug = cv2.cvtColor(white_mask, cv2.COLOR_GRAY2BGR)
-        if outer_masks:
-            for color_class in self.outer_color_classes:
-                mask = outer_masks.get(color_class['side'])
-                if mask is not None:
-                    white_debug[mask > 0] = color_class['color_bgr']
-        cv2.imshow(self.white_mask_window_name, white_debug)
-
     # ======================================================================
-    # 바깥 차선(도로 밖 색이 옆에 붙은 흰 덩어리) 판정
+    # 오른쪽 실선 찾기
     # ======================================================================
-    def classify_outer_lines(self, num_labels, labels, stats, centroids, outer_masks):
-        """바깥 실선인 흰 덩어리를 찾아 {label: (side, source)} 로 돌려준다.
+    def find_right_solid_line(self, white_mask, green_mask):
+        """초록 매트가 오른쪽에 붙은 흰 실선을 찾아 (마스크, 측정x, 모드, 사유) 반환.
 
-        source='color' 는 이번 프레임에 초록/회색으로 확인한 것, 'memory' 는
-        색 근거 없이 직전 기억 위치로 이어간 것이다. 차로를 옮기는 동안 바깥
-        색이 화면에서 사라져도 그 덩어리가 중앙 점선 후보로 올라오지 않게 한다.
+        - 흰색 덩어리 중 크기/모양 필터를 통과한 것만 후보로 본다.
+        - 후보를 green_near_distance_px 만큼 팽창시킨 이웃에서 초록 픽셀을 세고,
+          그 초록의 평균 x가 덩어리 평균 x보다 오른쪽이어야 오른쪽 실선으로 인정한다.
+          (중앙 점선은 양옆이 아스팔트라 여기서 걸러진다.)
+        - 여러 개면 직전 측정 x에 가장 가까운 것을, 없으면 가장 큰 것을 고른다.
         """
-        kernel_size = self.outer_near_distance_px * 2 + 1
+        return self.find_boundary_solid_line(white_mask, green_mask, 'right')
+
+    def find_boundary_solid_line(self, white_mask, color_mask, side):
+        """Find a white boundary with the configured color on its outer side."""
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+            white_mask, connectivity=8
+        )
+        if num_labels <= 1:
+            return None, None, 'none', 'no white component'
+
+        kernel_size = self.green_near_distance_px * 2 + 1
         kernel = cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE, (kernel_size, kernel_size)
         )
-        height, width = labels.shape
-        big_labels = [
-            label for label in range(1, num_labels)
-            if (
-                stats[label, cv2.CC_STAT_AREA]
-                >= self.outer_min_component_pixels
-                and stats[label, cv2.CC_STAT_HEIGHT] / float(height)
-                >= self.outer_min_vertical_span_ratio
-            )
-        ]
+        color_bool = color_mask > 0
 
-        sides = {}       # label -> (side, source)
-        confirmed = {}   # side -> x (이번 프레임 색 근거로 확인된 위치)
-        matched = {}     # side -> x (색이든 기억이든 이어진 위치)
-
-        pad = self.outer_near_distance_px
-        usable = {
-            color_class['side']: (
-                outer_masks.get(color_class['side']) is not None
-                and outer_masks[color_class['side']].any()
-            )
-            for color_class in self.outer_color_classes
-        }
-
-        for label in big_labels:
-            comp_x = float(centroids[label][0])
-            left = int(stats[label, cv2.CC_STAT_LEFT])
-            top = int(stats[label, cv2.CC_STAT_TOP])
-            right = left + int(stats[label, cv2.CC_STAT_WIDTH]) - 1
-            bottom = top + int(stats[label, cv2.CC_STAT_HEIGHT]) - 1
-            # 이웃 계산은 덩어리 bbox 주변 잘라낸 영역에서만 한다(전체 화면
-            # 팽창은 프레임당 수십 ms가 든다).
-            x0, x1 = max(0, left - pad), min(width, right + pad + 1)
-            y0, y1 = max(0, top - pad), min(height, bottom + pad + 1)
-            neighborhood = None
-            for color_class in self.outer_color_classes:
-                side = color_class['side']
-                if not usable[side]:
-                    continue
-                if neighborhood is None:
-                    comp = (labels[y0:y1, x0:x1] == label).astype(np.uint8)
-                    neighborhood = cv2.dilate(comp, kernel)
-                # 덩어리 bbox의 기대하는 쪽 "바깥"만 근거로 센다. 양쪽을 다 세고
-                # 평균 x로 판정하면 대칭인 번짐에서 좌/우가 뒤집힐 수 있다.
-                if side == 'left':
-                    band = slice(x0, max(x0, left - self.outer_side_margin_px))
-                else:
-                    band = slice(min(x1, right + 1 + self.outer_side_margin_px), x1)
-                if band.stop <= band.start:
-                    continue
-                sub_mask = outer_masks[side][y0:y1, band]
-                sub_neighborhood = neighborhood[:, band.start - x0:band.stop - x0]
-                near = cv2.bitwise_and(sub_mask, sub_neighborhood)
-                if int(cv2.countNonZero(near)) < self.outer_min_pixels:
-                    continue
-
-                sides[label] = (side, 'color')
-                # 같은 쪽에서 여러 덩어리가 확인되면 가장 바깥쪽 것이 바깥 실선이다.
-                if side not in confirmed:
-                    confirmed[side] = comp_x
-                elif side == 'left':
-                    confirmed[side] = min(confirmed[side], comp_x)
-                else:
-                    confirmed[side] = max(confirmed[side], comp_x)
-                matched[side] = confirmed[side]
-                break
-
-        # 색 근거가 사라진 쪽은 기억한 x 주변 덩어리를 계속 바깥 실선으로 본다.
-        # 여러 개가 걸리면 기억에 가장 가까운 하나만 기억 갱신에 쓴다.
-        nearest = {}  # side -> (distance, x)
-        for label in big_labels:
-            if label in sides:
-                continue
-            x, _y, w, _h, _area = stats[label]
-            for side, memory in self.outer_memory.items():
-                if memory is None or side in confirmed:
-                    continue
-                distance = max(
-                    float(x) - memory['x'],
-                    memory['x'] - float(x + w - 1),
-                    0.0,
-                )
-                if distance > self.outer_memory_tolerance_px:
-                    continue
-                sides[label] = (side, 'memory')
-                comp_x = float(centroids[label][0])
-                if side not in nearest or distance < nearest[side][0]:
-                    nearest[side] = (distance, comp_x)
-                break
-        for side, (_distance, comp_x) in nearest.items():
-            matched[side] = comp_x
-
-        self.update_outer_memory(confirmed, matched)
-        return sides
-
-    def update_outer_memory(self, confirmed, matched):
-        """바깥 실선 기억을 갱신하고, 오래되거나 끊긴 기억은 버린다."""
-        for side in list(self.outer_memory):
-            memory = self.outer_memory[side]
-            if side in confirmed:
-                x = confirmed[side]
-                if memory is None:
-                    self.outer_memory[side] = {'x': x, 'age': 0, 'misses': 0}
-                else:
-                    memory['x'] += self.outer_memory_adapt_rate * (x - memory['x'])
-                    memory['age'] = 0
-                    memory['misses'] = 0
-                continue
-            if memory is None:
-                continue
-
-            if side in matched:
-                # 색은 못 봤지만 같은 위치의 덩어리를 이어 잡았다: 위치만 따라간다.
-                # 단 도로 "바깥" 방향으로만, 그리고 한 프레임 이동량을 제한한다.
-                # 색 근거 없이 안쪽으로 끌려가면 결국 중앙 점선을 삼켜버린다.
-                # (바깥 실선이 실제로 안쪽으로 들어오는 상황이면 그 옆 초록/회색도
-                #  화면 안에 있으므로 색으로 다시 확인된다.)
-                step = float(np.clip(
-                    self.outer_memory_adapt_rate * (matched[side] - memory['x']),
-                    -self.outer_memory_max_drift_px,
-                    self.outer_memory_max_drift_px,
-                ))
-                step = min(step, 0.0) if side == 'left' else max(step, 0.0)
-                memory['x'] += step
-                memory['misses'] = 0
-            else:
-                memory['misses'] += 1
-            memory['age'] += 1
-
-            if (
-                memory['misses'] > self.outer_memory_max_misses
-                or memory['age'] > self.outer_memory_max_age_frames
-            ):
-                self.get_logger().info(
-                    f'Forgetting {side} outer-line memory at x={memory["x"]:.1f} '
-                    f'(age={memory["age"]}, misses={memory["misses"]})'
-                )
-                self.outer_memory[side] = None
-
-    def find_center_dashed_component(self, white_mask, expected_x, outer_masks=None):
-        """기준 x 주변에서 점선 모양에 가장 가까운 흰 성분 하나를 반환한다."""
-        self.last_dashed_connections = []
-        self.last_connected_dashed_mask = np.zeros_like(white_mask)
-        height, _width = white_mask.shape
-        # 가로선 제거가 점선과 교차한 지점에 만든 작은 틈만 세로로 복구한다.
-        reconnect_height = max(
-            15, self.horizontal_erase_half_band_px * 2 + 9
-        )
-        candidate_mask = cv2.morphologyEx(
-            white_mask,
-            cv2.MORPH_CLOSE,
-            np.ones((reconnect_height, 1), dtype=np.uint8),
-        )
-        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
-            candidate_mask, connectivity=8
-        )
-        outer_sides = self.classify_outer_lines(
-            num_labels, labels, stats, centroids, outer_masks or {}
-        )
-        self.last_outer_boxes = [
-            (
-                int(stats[label, cv2.CC_STAT_LEFT]),
-                int(stats[label, cv2.CC_STAT_TOP]),
-                int(stats[label, cv2.CC_STAT_WIDTH]),
-                int(stats[label, cv2.CC_STAT_HEIGHT]),
-                side,
-                source,
-            )
-            for label, (side, source) in outer_sides.items()
-        ]
-        candidates = []
-        support_candidates = []
+        best = None  # (score, label)
+        shape_pass = 0
         for label in range(1, num_labels):
-            if label in outer_sides:
-                # 바깥 실선(초록/회색이 옆에 있거나, 직전에 그렇게 판정한 위치)
-                # 은 중앙 점선 후보에서 제외한다.
-                continue
             x, y, w, h, area = stats[label]
-            spans_full_height = y <= 2 and y + h >= height - 2
-            vertical_span_ratio = h / float(height)
-            average_width = area / float(h)
-            common_shape_ok = (
-                w >= self.dash_min_width_px
-                and average_width >= self.dash_min_average_width_px
-                and average_width <= self.dash_max_average_width_px
-                and h > w
-                and not spans_full_height
-                and vertical_span_ratio <= self.dash_max_vertical_span_ratio
-            )
-            if not common_shape_ok:
+            if area < self.min_component_area:
+                continue
+            if h < self.min_line_height_px:
+                continue
+            if w > 0 and (h / float(w)) < self.min_line_aspect_ratio:
                 continue
 
-            # 기울어진 점선은 bbox 중심보다 ROI 하단 연장점이 차량 위치 오차를
-            # 더 잘 나타낸다. 성분 픽셀로 x=f(y)를 피팅해 하단 x를 예측한다.
+            # 실제 회전 차선은 축 정렬 bbox만 보면 넓어질 수 있으므로
+            # minAreaRect의 긴 변/짧은 변으로 길쭉함을 판단한다. 단, 이
+            # 필터는 작은 객체에만 적용해 큰 대각선 차선을 보호한다.
+            comp = labels == label
+            if (
+                area <= self.small_compact_max_area
+                and max(w, h) <= self.small_compact_max_side_px
+                and self.component_elongation(comp)
+                < self.small_compact_min_elongation
+            ):
+                continue
+            shape_pass += 1
+
+            neighborhood = cv2.dilate(comp.astype(np.uint8), kernel) > 0
+            color_near = color_bool & neighborhood
+            color_count = int(np.count_nonzero(color_near))
+            if color_count < self.green_min_pixels:
+                continue
+            color_mean_x = float(np.nonzero(color_near)[1].mean())
+            comp_mean_x = float(centroids[label][0])
+            if (
+                side == 'right'
+                and color_mean_x < comp_mean_x + self.green_right_margin_px
+            ):
+                continue
+            if (
+                side == 'left'
+                and color_mean_x > comp_mean_x - self.green_right_margin_px
+            ):
+                continue
+
+            if self.last_line_x is not None:
+                score = -abs(comp_mean_x - self.last_line_x)  # 가까울수록 높은 점수
+            else:
+                score = float(area)
+            if best is None or score > best[0]:
+                best = (score, label)
+
+        if best is None:
+            reason = (
+                f'no {side} color-backed line'
+                if shape_pass else 'no line-shaped component'
+            )
+            return None, None, 'none', reason
+
+        line_mask = (labels == best[1]).astype(np.uint8) * 255
+        measured_x, mode = self.measure_near_x(line_mask)
+        if measured_x is None:
+            return line_mask, None, mode, 'near band empty'
+        return line_mask, measured_x, mode, ''
+
+    @staticmethod
+    def component_elongation(component_mask):
+        """Return rotated long-side/short-side ratio for one component."""
+        ys, xs = np.nonzero(component_mask)
+        if len(xs) < 3:
+            return 1.0
+        points = np.column_stack((xs, ys)).astype(np.float32)
+        side_a, side_b = cv2.minAreaRect(points)[1]
+        long_side = max(float(side_a), float(side_b))
+        short_side = min(float(side_a), float(side_b))
+        if short_side < 1.0:
+            return long_side
+        return long_side / short_side
+
+    def measure_near_x(self, line_mask):
+        """실선 중 차량과 y축으로 가장 가까운 구간의 x를 median으로 잰다.
+
+        커브에서 실선 전체를 평균 내면 먼 쪽 곡률에 끌려 기준 x가 왜곡되므로,
+        ROI 바닥에서 near_rows 이내의 픽셀만 사용한다. 그 구간이 비어 있으면
+        (실선이 화면 위쪽에서만 보이는 경우) 실선 자체의 아래쪽 near_rows 행으로
+        폴백한다. 어느 쪽을 썼는지 모드로 돌려 디버그에 표시한다.
+        """
+        height = line_mask.shape[0]
+        ys, xs = np.nonzero(line_mask)
+        if ys.size == 0:
+            return None, 'none'
+
+        near = ys >= (height - self.near_rows)
+        if int(near.sum()) >= self.near_min_pixels:
+            return float(np.median(xs[near])), 'near band'
+
+        if self.allow_line_bottom_fallback:
+            bottom_cut = ys.max() - self.near_rows
+            bottom = ys >= bottom_cut
+            if int(bottom.sum()) >= self.near_min_pixels:
+                return float(np.median(xs[bottom])), 'line bottom'
+        return None, 'none'
+
+    def find_center_line(self, white_mask, target_center_x=None):
+        """중앙 점선 조각들을 하나의 트랙으로 묶어 하단 x를 추정한다.
+
+        점선은 위/아래 조각이 연결요소로 분리된다. 한 조각만 고르면 그 조각이
+        사라지는 프레임에 fallback이 끊기므로, 기준 x 근처의 세로로 분리된 조각을
+        모두 모은 뒤 슬라이딩 윈도우로 빈 구간을 건너며 직선 피팅한다.
+        """
+        reference_x = (
+            self.last_center_line_x
+            if self.last_center_line_x is not None
+            else (
+                self.target_center_x
+                if target_center_x is None else target_center_x
+            )
+        )
+        center_mask, piece_count, reason = self.collect_center_dashed_pieces(
+            white_mask, reference_x
+        )
+        if center_mask is None:
+            return None, None, 'none', reason
+
+        measured_x, observation_count = self.track_center_dashed_line(
+            center_mask, reference_x
+        )
+        if measured_x is None:
+            return center_mask, None, 'none', 'center sliding-window track failed'
+        return (
+            center_mask,
+            measured_x,
+            f'center track ({piece_count} pieces/{observation_count} points)',
+            '',
+        )
+
+    def collect_center_dashed_pieces(self, white_mask, reference_x):
+        """중앙선 후보 중 위아래로 분리된 점선 조각을 함께 고른다."""
+        reconnect_kernel = np.ones(
+            (self.center_reconnect_height_px, 1), dtype=np.uint8
+        )
+        candidates_mask = cv2.morphologyEx(
+            white_mask, cv2.MORPH_CLOSE, reconnect_kernel
+        )
+        height, _width = white_mask.shape
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+            candidates_mask, connectivity=8
+        )
+        candidates = []
+        for label in range(1, num_labels):
+            x, y, w, h, area = stats[label]
+            if area < self.min_component_area or h < self.min_line_height_px:
+                continue
+            if w > 0 and (h / float(w)) < self.min_line_aspect_ratio:
+                continue
+
             local_y, local_x = np.where(labels == label)
             if len(np.unique(local_y)) >= 3:
                 slope, intercept = np.polyfit(local_y, local_x, 1)
                 bottom_x = float(slope * (height - 1) + intercept)
             else:
                 bottom_x = float(centroids[label][0])
-            distance = abs(bottom_x - float(expected_x))
             bbox_distance = max(
-                float(x) - float(expected_x),
-                float(expected_x) - float(x + w - 1),
+                float(x) - float(reference_x),
+                float(reference_x) - float(x + w - 1),
                 0.0,
             )
-            if min(distance, bbox_distance) > self.dashed_window_margin:
-                continue
-
-            candidate = (distance, bottom_x, label, x, y, w, h)
-            if (
-                h >= self.dash_support_min_vertical_span_px
-                and area >= self.dash_support_min_component_pixels
-            ):
-                support_candidates.append(candidate)
-            if (
-                h < self.dash_min_vertical_span_px
-                or area < self.dash_min_component_pixels
-            ):
-                # 짧은 조각은 단독 중앙선으로 채택하지 않고, 아래에서 엄격한
-                # 기준 조각과 같은 선상일 때만 보조 조각으로 연결한다.
-                continue
-            candidates.append(candidate)
+            distance = abs(bottom_x - float(reference_x))
+            if min(distance, bbox_distance) <= self.center_search_half_width_px:
+                candidates.append((distance, label, x, y, w, h))
 
         if not candidates:
-            return None, []
+            return None, 0, 'no center dash component in search window'
 
-        # 하단 점선 조각을 기준으로 잡고, y구간이 겹치지 않는 위쪽/아래쪽
-        # 조각도 같은 트랙에 추가한다. 같은 높이의 평행 실선은 제외된다.
-        primary = min(candidates, key=lambda candidate: candidate[0])
-        selected = [primary]
-        for candidate in sorted(support_candidates, key=lambda item: item[0]):
-            if candidate is primary:
+        # 기준선에 가장 가까운 조각을 시작점으로 정하고, y 구간이 겹치지 않는
+        # 위/아래 조각을 같은 점선 트랙으로 추가한다.
+        selected = [min(candidates, key=lambda candidate: candidate[0])]
+        for candidate in sorted(candidates, key=lambda item: item[0]):
+            if candidate[1] == selected[0][1]:
                 continue
-            _distance, bottom_x, _label, _x, y, _w, h = candidate
-            # 첨부 코드의 last_line_x lock과 같은 원리로, 기준 조각을 하단까지
-            # 연장했을 때의 x와 너무 먼 조각은 다른 흰 선으로 보고 제외한다.
-            if (
-                abs(bottom_x - primary[1])
-                > self.dash_connect_max_horizontal_gap_px
-            ):
-                continue
-            vertically_separate = True
+            _distance, _label, _x, y, _w, h = candidate
+            separate = True
             for chosen in selected:
-                chosen_y, chosen_h = chosen[4], chosen[6]
+                chosen_y, chosen_h = chosen[3], chosen[5]
                 overlap = max(
-                    0,
-                    min(y + h, chosen_y + chosen_h) - max(y, chosen_y),
+                    0, min(y + h, chosen_y + chosen_h) - max(y, chosen_y)
                 )
-                overlap_ratio = overlap / float(min(h, chosen_h))
-                if overlap_ratio > self.dash_max_vertical_overlap_ratio:
-                    vertically_separate = False
+                if overlap / float(min(h, chosen_h)) > self.center_max_vertical_overlap_ratio:
+                    separate = False
                     break
-            if vertically_separate:
+            if separate:
                 selected.append(candidate)
-            if len(selected) >= self.dash_max_tracked_pieces:
+            if len(selected) >= self.center_max_tracked_pieces:
                 break
 
         filtered = np.zeros_like(white_mask)
-        boxes = []
-        for _distance, _bottom_x, label, x, y, w, h in selected:
-            filtered[labels == label] = 255
-            boxes.append((int(x), int(y), int(w), int(h)))
-        self.connect_selected_dashed_components(filtered, labels, selected)
-        self.last_connected_dashed_mask = filtered.copy()
-        return filtered, boxes
+        for _distance, label, _x, _y, _w, _h in selected:
+            # 닫힘(morphological close)으로 후보를 연결했더라도, offset에는 실제
+            # 흰색 점선 픽셀만 사용한다. 점선 사이의 가상 연결선에 끌리지 않는다.
+            filtered[(labels == label) & (white_mask > 0)] = 255
+        return filtered, len(selected), ''
 
-    def connect_selected_dashed_components(self, mask, labels, selected):
-        """같은 중앙선의 위·아래 점선 조각 사이 공백을 선분으로 채운다."""
-        geometries = []
-        for candidate in selected:
-            label = candidate[2]
-            ys, xs = np.where(labels == label)
-            if ys.size == 0:
-                continue
-            y_top = int(ys.min())
-            y_bottom = int(ys.max())
-            if len(np.unique(ys)) >= 3:
-                slope, intercept = np.polyfit(ys, xs, 1)
-                x_top = float(slope * y_top + intercept)
-                x_bottom = float(slope * y_bottom + intercept)
-            else:
-                x_top = x_bottom = float(xs.mean())
-            geometries.append({
-                'top': (int(round(x_top)), y_top),
-                'bottom': (int(round(x_bottom)), y_bottom),
-            })
-
-        geometries.sort(key=lambda item: item['top'][1])
-        for upper, lower in zip(geometries, geometries[1:]):
-            start = upper['bottom']
-            end = lower['top']
-            vertical_gap = end[1] - start[1]
-            horizontal_gap = abs(end[0] - start[0])
-            if vertical_gap <= 0:
-                continue
-            if vertical_gap > self.dash_connect_max_vertical_gap_px:
-                continue
-            if horizontal_gap > self.dash_connect_max_horizontal_gap_px:
-                continue
-            cv2.line(
-                mask,
-                start,
-                end,
-                255,
-                self.dash_connect_thickness_px,
-                cv2.LINE_8,
-            )
-            self.last_dashed_connections.append((start, end))
-
-    def show_connected_dashed_view(self):
-        """원본 점선 조각은 흰색, 이어 붙인 구간은 노란색으로 표시한다."""
-        if not self.debug_view or self.last_connected_dashed_mask is None:
-            return
-        debug = cv2.cvtColor(
-            self.last_connected_dashed_mask, cv2.COLOR_GRAY2BGR
-        )
-        for start, end in self.last_dashed_connections:
-            cv2.line(
-                debug,
-                start,
-                end,
-                (0, 255, 255),
-                self.dash_connect_thickness_px,
-                cv2.LINE_AA,
-            )
-        cv2.imshow(self.connected_dash_window_name, debug)
-
-    def get_window_start_x(self, lane_name, fallback_x):
-        """저장된 시작점이 있으면 사용하고, 첫 프레임만 색/모드 기준값을 쓴다."""
-        start_x = self.window_start_x[lane_name]
-        return float(fallback_x) if start_x is None and fallback_x is not None else start_x
-
-    def update_window_start_x(self, lane_name, detected_x, image_width):
-        """유효 검출값 쪽으로 다음 프레임 시작점을 조금씩 이동한다."""
-        if detected_x is None:
-            return
-        previous_x = self.window_start_x[lane_name]
-        if previous_x is None:
-            next_x = float(detected_x)
-        elif abs(float(detected_x) - previous_x) > self.max_window_start_jump_px:
-            self.get_logger().warn(
-                f'{lane_name} window start jump rejected: '
-                f'{previous_x:.1f} -> {float(detected_x):.1f}',
-                throttle_duration_sec=1.0,
-            )
-            return
-        else:
-            next_x = previous_x + self.window_start_adapt_rate * (
-                float(detected_x) - previous_x
-            )
-        self.window_start_x[lane_name] = float(
-            np.clip(next_x, 0, max(0, image_width - 1))
-        )
-
-    def track_lane_with_sliding_window(self, white_mask, base_x, margin, allow_gaps):
-        """한 차선을 슬라이딩 윈도우로 추적한다.
-
-        점선(`allow_gaps=True`)은 빈 창에서 박스 중심을 그대로 유지한다. 이후
-        같은 위치 근처에서 흰 성분이 다시 잡힐 때만 박스 중심을 갱신한다.
-        관측된 점선 조각은 직선 피팅으로 연결하며, 반환 x는 ROI 하단 위치다.
-        """
-        height, width = white_mask.shape
-        window_height = max(1, height // self.num_windows)
+    def track_center_dashed_line(self, center_mask, base_x):
+        """점선 공백을 유지하며 모든 관측 조각으로 하단 x를 피팅한다."""
+        height, width = center_mask.shape
+        window_height = max(1, height // self.center_num_windows)
         x_current = float(base_x)
-        windows, collected_x, collected_y = [], [], []
+        collected_x, collected_y = [], []
 
-        for i in range(self.num_windows):
-            y_high = height - i * window_height
-            y_low = max(0, height - (i + 1) * window_height)
-            x_low = max(0, int(round(x_current - margin)))
-            x_high = min(width, int(round(x_current + margin + 1)))
-            windows.append((x_low, max(x_low, x_high - 1), y_low, y_high))
+        for index in range(self.center_num_windows):
+            y_high = height - index * window_height
+            y_low = max(0, height - (index + 1) * window_height)
+            x_low = max(0, int(round(x_current - self.center_window_margin_px)))
+            x_high = min(width, int(round(x_current + self.center_window_margin_px + 1)))
             if x_high <= x_low or y_high <= y_low:
                 continue
 
-            sub_mask = white_mask[y_low:y_high, x_low:x_high]
+            sub_mask = center_mask[y_low:y_high, x_low:x_high]
             num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
                 sub_mask, connectivity=8
             )
-            candidates = [
+            choices = [
                 label for label in range(1, num_labels)
-                if stats[label, cv2.CC_STAT_AREA] >= self.window_min_component_pixels
+                if stats[label, cv2.CC_STAT_AREA]
+                >= self.center_window_min_component_pixels
             ]
-            if not candidates:
-                # 점선 공백: 이전 슬라이딩 윈도우 박스 위치를 그대로 유지한다.
+            if not choices:
+                # 점선 사이 공백에서는 현재 위치를 유지해 다음 조각을 계속 찾는다.
                 continue
 
             label = min(
-                candidates,
+                choices,
                 key=lambda item: abs((centroids[item][0] + x_low) - x_current),
             )
-            local_ys, local_xs = np.where(labels == label)
-            xs, ys = local_xs + x_low, local_ys + y_low
-            observed_x = float(xs.mean())
-            x_current = observed_x
+            local_y, local_x = np.where(labels == label)
+            xs, ys = local_x + x_low, local_y + y_low
+            x_current = float(xs.mean())
             collected_x.extend(xs.tolist())
             collected_y.extend(ys.tolist())
 
-        if len(collected_x) < self.window_min_component_pixels:
-            return None, windows, collected_x, collected_y
-        unique_y = len(set(collected_y))
-        if unique_y >= 3 and len(collected_x) >= 12:
-            coeffs = np.polyfit(collected_y, collected_x, 1)
-            line_x = float(np.polyval(coeffs, height - 1))
+        if len(collected_x) < self.center_window_min_component_pixels:
+            return None, len(collected_x)
+        if len(set(collected_y)) >= 3 and len(collected_x) >= 12:
+            slope, intercept = np.polyfit(collected_y, collected_x, 1)
+            line_x = float(slope * (height - 1) + intercept)
         else:
             line_x = float(np.mean(collected_x))
-        return line_x, windows, collected_x, collected_y
+        return line_x, len(collected_x)
+
+    # ======================================================================
+    # 조향 매핑 / 발행
+    # ======================================================================
+    def map_line_x_to_offset(self, measured_x, target_x):
+        """검출한 기준선 x를 해당 목표 x로 되돌리는 offset(+/-45)을 만든다.
+
+        measured_x < target(차가 오른쪽으로 치우침) -> error<0 -> offset<0 -> 좌조향.
+        오른쪽 실선과 중앙 점선은 x만 다를 뿐 같은 화면 좌표/부호 규약을 쓴다.
+        """
+        error_px = float(measured_x) - float(target_x)
+        normalized = np.clip(error_px / self.offset_error_limit_px, -1.0, 1.0)
+        scaled = normalized * self.lane_offset_limit
+        return int(round(np.clip(
+            scaled, -self.lane_offset_limit, self.lane_offset_limit
+        )))
+
+    def publish_offset(self, value):
+        msg = Int16()
+        msg.data = int(np.clip(value, -self.lane_offset_limit, self.lane_offset_limit))
+        self.offset_pub.publish(msg)
 
     # ======================================================================
     # 디버그 시각화
     # ======================================================================
+    def show_mask_windows(self, white_mask, green_mask):
+        if not self.debug_view:
+            return
+        green_debug = np.zeros((*green_mask.shape, 3), dtype=np.uint8)
+        green_debug[green_mask > 0] = (0, 255, 0)
+        cv2.imshow(WHITE_MASK_WINDOW_NAME, cv2.cvtColor(white_mask, cv2.COLOR_GRAY2BGR))
+        cv2.imshow(GREEN_MASK_WINDOW_NAME, green_debug)
+
     def publish_debug(
-        self, src_msg, frame, status, near_white_ratio,
-        base_x=None, line_x=None, windows=None,
-        points_x=None, points_y=None, lane_offset=None, lane_tracks=None,
-        dashed_components=None, solid_mask=None, solid_side=None,
+        self, src_msg, frame, status, line_mask, measured_x, measure_mode,
+        raw_offset=None, target_x=None, line_kind='RIGHT', held_x=None,
     ):
         if not (self.debug_view or self.publish_debug_image):
             return
 
         debug = frame.copy()
         height, width = debug.shape[:2]
+        if target_x is None:
+            target_x = self.target_right_x
+        # BEV 전체가 검출 ROI다.
+        roi_top_y = 0
         roi_bottom_y = height - 1
-        near_top_y = max(0, height - SOLID_NEAR_ROWS)
+
+        # ROI 경계(노랑)
+        cv2.rectangle(debug, (0, roi_top_y), (width - 1, roi_bottom_y), (0, 255, 255), 1)
+
+        # 조향 x를 재는 근접 밴드(초록 반투명) — "어느 정도 가까운 지점만 보는지"
+        near_top_y = int(np.clip(height - self.near_rows, 0, height - 1))
+        overlay = debug.copy()
         cv2.rectangle(
-            debug, (0, near_top_y), (width - 1, roi_bottom_y), (0, 220, 0), 1
+            overlay, (0, near_top_y), (width - 1, roi_bottom_y), (0, 220, 0), -1
+        )
+        cv2.addWeighted(overlay, 0.28, debug, 0.72, 0, debug)
+        cv2.line(debug, (0, near_top_y), (width - 1, near_top_y), (0, 220, 0), 1)
+        cv2.putText(
+            debug, f'near_rows={self.near_rows}', (8, near_top_y - 6),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 220, 0), 1, cv2.LINE_AA,
         )
 
-        if solid_mask is not None and solid_mask.any():
-            ys, xs = np.nonzero(solid_mask)
+        # 인식된 오른쪽 실선 "전체"를 빨강으로 칠한다(마스킹 정확도 확인용)
+        if line_mask is not None and line_mask.any():
+            ys, xs = np.nonzero(line_mask)
             debug[ys, xs] = (0, 0, 255)
 
-        if base_x is not None:
+        # 기준 x 세로선(주황) — "여기 오면 offset=0"
+        self.draw_dashed_vline(
+            debug, target_x, roi_top_y, roi_bottom_y, (0, 165, 255)
+        )
+        cv2.putText(
+            debug,
+            f'target_{line_kind.lower()}_x={target_x}',
+            (min(target_x + 6, width - 190), roi_top_y + 18),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 2, cv2.LINE_AA,
+        )
+
+        # 측정된 x(노란 원 + 세로선)와 기준선까지의 오차
+        if measured_x is not None:
+            mx = int(round(measured_x))
+            cv2.circle(debug, (mx, roi_bottom_y - 4), 7, (0, 255, 255), -1)
             self.draw_dashed_vline(
-                debug, int(round(base_x)), 0, roi_bottom_y, (0, 165, 255)
+                debug, mx, near_top_y, roi_bottom_y, (0, 255, 255), dash=5
             )
-        if line_x is not None:
-            measured_x = int(round(line_x))
-            cv2.circle(debug, (measured_x, roi_bottom_y - 4), 7, (0, 255, 255), -1)
-            self.draw_dashed_vline(
-                debug, measured_x, near_top_y, roi_bottom_y, (0, 255, 255), dash=5
+            cv2.line(
+                debug, (mx, roi_bottom_y - 4),
+                (int(target_x), roi_bottom_y - 4), (255, 255, 255), 1,
             )
 
-        color = (0, 255, 0) if status == 'OK' else (0, 0, 255)
+        # 이번 프레임의 중앙선은 신뢰하지 않아 offset을 유지하는 중이다. 직전
+        # 정상 중앙선 위치는 보라색으로 남겨, 제어가 어느 위치를 유지하는지
+        # 디버그 화면에서도 바로 확인할 수 있게 한다.
+        if held_x is not None:
+            hx = int(round(held_x))
+            cv2.circle(debug, (hx, roi_bottom_y - 4), 8, (255, 0, 255), 2)
+            self.draw_dashed_vline(
+                debug, hx, near_top_y, roi_bottom_y, (255, 0, 255), dash=4
+            )
+            cv2.putText(
+                debug, f'HELD center_x={held_x:.0f}',
+                (min(hx + 6, width - 180), near_top_y + 18),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2, cv2.LINE_AA,
+            )
+
+        color = (0, 255, 0) if status in (
+            'OK', 'CENTER FALLBACK', 'CENTER STEP LIMITED'
+        ) else (0, 0, 255)
+        err = '--' if measured_x is None else f'{measured_x - target_x:+.0f}'
         lines = [
-            f'status: {status}',
-            f'lane_offset: {lane_offset if lane_offset is not None else self.last_offset}',
-            f'mode: {self.driving_mode}, transition: '
-            f'{self.lane_change_state or "none"}',
-            f'solid: {solid_side or "--"}, reference_x: '
-            f'{base_x if base_x is not None else "--"}, '
-            f'measured_x: {line_x if line_x is not None else "--"}',
-            f'white_ratio: {near_white_ratio:.2f}',
+            f'status: {status}   mode: {measure_mode}',
+            f'{line_kind.lower()}_x: {"--" if measured_x is None else f"{measured_x:.0f}"} '
+            f'-> target {target_x} (err {err})',
+            (
+                f'held_center_x: {held_x:.0f} (previous accepted)'
+                if held_x is not None else ''
+            ),
+            f'offset: {raw_offset if raw_offset is not None else "--"} '
+            f'(smoothed {self.last_offset:.1f})',
+            f'green: min_px={self.green_min_pixels} near={self.green_near_distance_px}',
         ]
         for i, text in enumerate(lines):
             cv2.putText(
-                debug, text, (10, 20 + i * 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA
+                debug, text, (10, 20 + i * 22),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA,
             )
 
         if self.debug_view:
-            cv2.imshow(self.window_name, debug)
+            cv2.imshow(WINDOW_NAME, debug)
             cv2.waitKey(1)
         if self.publish_debug_image:
             self.debug_pub.publish(self.to_image_msg(debug, src_msg.header.stamp))
-
-    def describe_outer_memory(self):
-        """디버그 텍스트용 바깥 실선 기억 요약."""
-        parts = []
-        for side, memory in self.outer_memory.items():
-            if memory is None:
-                parts.append(f'{side}=--')
-            else:
-                parts.append(
-                    f'{side}={memory["x"]:.0f}(age{memory["age"]})'
-                )
-        return ' '.join(parts)
 
     def draw_dashed_vline(self, img, x, y_top, y_bottom, color, dash=8):
         x = int(x)
@@ -1528,7 +1213,7 @@ class MissionLaneOffsetNode(Node):
         return msg
 
     # ======================================================================
-    # YUYV -> BGR 변환 (sensor_utils/camera_viewer_node.py 와 동일한 방식)
+    # YUYV -> BGR
     # ======================================================================
     def to_bgr(self, msg):
         data = np.frombuffer(msg.data, dtype=np.uint8)

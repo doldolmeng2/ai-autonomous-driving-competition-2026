@@ -8,6 +8,14 @@
 | `mission_lane_offset_node` | `/lane_info`, `/camera/high/image_raw` | `/lane_offset` |
 | `lane_offset_debug_viewer_node` | `/lane_offset/debug_image` | OpenCV window |
 
+`mission_lane_offset_node`에는 현재 `timed_lane_offset_node`의 BEV, 색상 경계
+실선 검출, 중앙 점선 fallback, 근접 x 측정, offset 매핑 파라미터와 구현을
+독립적인 복사본으로 넣었다. 이후 한쪽 파일을 변경해도 다른 노드에는 자동으로
+반영되지 않는다. 미션 복사본에는 `/lane_info`에 따른 1/2차로 선택과 목적 차로
+경계선을 찾을 때까지 유지하는 차선 변경 조향이 추가되어 있다. 2차로는 오른쪽
+초록 경계선을 우선하고, 보이지 않으면 중앙 점선을 사용한다. 1차로도 같은
+알고리즘으로 왼쪽 밝은 회색 경계선과 중앙 점선을 사용한다.
+
 PDF flow:
 
 ```text
