@@ -32,6 +32,12 @@ def generate_launch_description():
         package='sensor_topic',
         executable='sensor_readiness_node',
         output='screen',
+        parameters=[{
+            'required_topics': [
+                '/scan',
+                '/camera/high/image_raw',
+            ],
+        }],
     )
     application_actions = [
         Node(

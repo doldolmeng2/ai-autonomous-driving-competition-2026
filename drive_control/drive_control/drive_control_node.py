@@ -32,9 +32,9 @@ STEER_RAW_LEFT = 530
 STEER_RAW_CENTER = 455
 STEER_RAW_RIGHT = 380
 # Time-trial lane driving PID.
-TIMED_STEER_PID_KP = 10.0
+TIMED_STEER_PID_KP = 8.0
 TIMED_STEER_PID_KI = 0.0
-TIMED_STEER_PID_KD = 0.5
+TIMED_STEER_PID_KD = 0.7
 # Mission lane driving PID. Tune these independently from the timed profile.
 MISSION_STEER_PID_KP = 20.0
 MISSION_STEER_PID_KI = 0.0

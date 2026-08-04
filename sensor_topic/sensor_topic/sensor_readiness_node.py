@@ -73,15 +73,18 @@ class SensorReadinessNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = SensorReadinessNode()
+    interrupted = False
     try:
         while rclpy.ok() and not node.ready:
             rclpy.spin_once(node, timeout_sec=0.2)
     except KeyboardInterrupt:
-        pass
+        interrupted = True
     finally:
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
+    if interrupted:
+        raise SystemExit(130)
 
 
 if __name__ == '__main__':

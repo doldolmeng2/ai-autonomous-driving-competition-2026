@@ -97,7 +97,7 @@ SMALL_COMPACT_MIN_ELONGATION = 2.0
 # 차가 정상 위치일 때 오른쪽 실선이 있어야 할 BEV 화면 x.
 # 기존 카메라 좌표 보정값을 유지한 값이므로, BEV 적용 후에는 디버그 화면의
 # right_x를 보고 다시 조정해야 한다.
-TARGET_RIGHT_X = 510
+TARGET_RIGHT_X = 540
 # 초록 매트 검증을 통과한 오른쪽 실선이 이 프레임 수만큼 연속으로 보일 때만
 # 중앙선 fallback에서 오른쪽 실선 제어로 복귀한다.
 RIGHT_GREEN_STABLE_FRAMES = 10

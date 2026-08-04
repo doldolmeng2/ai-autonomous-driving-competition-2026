@@ -1,0 +1,6 @@
+alias lane_time='bash "$HOME/osy/260801/ai-autonomous-driving-competition-2026/competition_workflow.sh" lane_time'
+alias lane_mission='bash "$HOME/osy/260801/ai-autonomous-driving-competition-2026/competition_workflow.sh" lane_mission'
+alias parking='bash "$HOME/osy/260801/ai-autonomous-driving-competition-2026/competition_workflow.sh" parking'
+alias manual_bag='bash "$HOME/osy/260801/ai-autonomous-driving-competition-2026/competition_workflow.sh" manual_bag'
+alias tuner_ycrcb='bash "$HOME/osy/260801/ai-autonomous-driving-competition-2026/competition_workflow.sh" tuner_ycrcb'
+alias tuner_hsv='bash "$HOME/osy/260801/ai-autonomous-driving-competition-2026/competition_workflow.sh" tuner_hsv'
