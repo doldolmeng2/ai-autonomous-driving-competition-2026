@@ -5,14 +5,15 @@ import numpy as np
 import rclpy
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.node import Node
-from sensor_msgs.msg import Image, Range
+from sensor_msgs.msg import Image, LaserScan
 from std_msgs.msg import Int16, Int16MultiArray
 
 
 LOW_IMAGE_TOPIC = '/camera/low/image_raw'
-ULTRASONIC_TOPICS = [f'/ultrasonic/range_{index}' for index in range(1, 7)]
+SCAN_TOPIC = '/scan'
 LANE_OFFSET_TOPIC = '/lane_offset'
 LANE_INFO_TOPIC = '/lane_info'
+LANE_CHANGE_COMPLETE_TOPIC = '/lane_change_complete'
 MOTOR_CONTROL_TOPIC = '/motor_control'
 
 ######## 최대 조향각(angle임. +-45도) 및 속도(PWM. 0~255) ########
@@ -26,12 +27,17 @@ MAX_STEER = 45
 # 미션 시작 차선의 단일 설정값. lane_offset 노드는 /lane_info를 받아 이 값을
 # 따라가므로 시작 차선을 바꿀 때는 이 상수만 수정한다.
 DRIVING_MODE = '2lane'
-LANE_CHANGE_CLOSE_DISTANCE = 0.6
-LANE_CHANGE_CLEAR_DISTANCE = 1.2
-LANE_CHANGE_CLOSE_CONFIRM_SAMPLES = 3
-LANE_CHANGE_CLEAR_CONFIRM_SAMPLES = 3
-# 차선 변경을 한 번 확정한 뒤 다음 변경 감지를 잠그는 시간.
-LANE_CHANGE_COOLDOWN_SEC = 7.0
+# LiDAR 각도: 후진 0도, 오른쪽 +90도, 왼쪽 -90도, 전진 +/-180도.
+# 2차선은 왼쪽(-100~-90도), 1차선은 오른쪽(+90~+100도)에서
+# 0.7m 이내 물체가 보였다가 사라지면 추월이 완료된 것으로 본다.
+LIDAR_RIGHT_ANGLE_MIN_DEG = 90.0
+LIDAR_RIGHT_ANGLE_MAX_DEG = 100.0
+LIDAR_LEFT_ANGLE_MIN_DEG = -100.0
+LIDAR_LEFT_ANGLE_MAX_DEG = -90.0
+LIDAR_OVERTAKE_MAX_DISTANCE_M = 1.0
+LIDAR_OVERTAKE_CLEAR_DISTANCE_M = 1.2
+LIDAR_DETECT_CONFIRM_SCANS = 3
+LIDAR_CLEAR_CONFIRM_SCANS = 3
 # 한 번의 노드 실행에서 각 방향(1->2, 2->1)으로 허용할 최대 변경 횟수.
 LANE_CHANGE_MAX_PER_DIRECTION = 1
 ##############################################################
@@ -42,6 +48,9 @@ LANE_CHANGE_MAX_PER_DIRECTION = 1
 DEBUG_VIEW = True
 DEBUG_WINDOW_NAME = 'mission_lane_main_debug'
 TRAFFIC_LIGHT_DEBUG_WINDOW_NAME = 'mission_lane_traffic_light_mask'
+LIDAR_DEBUG_WINDOW_NAME = 'mission_lane_lidar_debug'
+LIDAR_DEBUG_IMAGE_SIZE = 640
+LIDAR_DEBUG_MAX_RANGE_M = 2.0
 TRAFFIC_LIGHT_ROI_HEIGHT_RATIO = 0.55
 TRAFFIC_LIGHT_ROI_X_MIN_RATIO = 0.0
 TRAFFIC_LIGHT_ROI_X_MAX_RATIO = 0.70
@@ -78,7 +87,7 @@ class MissionLaneMainNode(Node):
 
     PDF flow:
         /camera/low/image_raw
-        /ultrasonic/range_1 ... /ultrasonic/range_6
+        /scan
         /lane_offset
             -> mission_lane_main_node
             -> /lane_info, /motor_control
@@ -90,22 +99,31 @@ class MissionLaneMainNode(Node):
         self.declare_parameter('base_speed', BASE_SPEED)
         self.declare_parameter('max_steer', MAX_STEER)
         self.declare_parameter('driving_mode', DRIVING_MODE)
+        self.declare_parameter('scan_topic', SCAN_TOPIC)
         self.declare_parameter(
-            'lane_change_close_distance', LANE_CHANGE_CLOSE_DISTANCE
+            'lidar_right_angle_min_deg', LIDAR_RIGHT_ANGLE_MIN_DEG
         )
         self.declare_parameter(
-            'lane_change_clear_distance', LANE_CHANGE_CLEAR_DISTANCE
+            'lidar_right_angle_max_deg', LIDAR_RIGHT_ANGLE_MAX_DEG
         )
         self.declare_parameter(
-            'lane_change_close_confirm_samples',
-            LANE_CHANGE_CLOSE_CONFIRM_SAMPLES,
+            'lidar_left_angle_min_deg', LIDAR_LEFT_ANGLE_MIN_DEG
         )
         self.declare_parameter(
-            'lane_change_clear_confirm_samples',
-            LANE_CHANGE_CLEAR_CONFIRM_SAMPLES,
+            'lidar_left_angle_max_deg', LIDAR_LEFT_ANGLE_MAX_DEG
         )
         self.declare_parameter(
-            'lane_change_cooldown_sec', LANE_CHANGE_COOLDOWN_SEC
+            'lidar_overtake_max_distance_m', LIDAR_OVERTAKE_MAX_DISTANCE_M
+        )
+        self.declare_parameter(
+            'lidar_overtake_clear_distance_m',
+            LIDAR_OVERTAKE_CLEAR_DISTANCE_M,
+        )
+        self.declare_parameter(
+            'lidar_detect_confirm_scans', LIDAR_DETECT_CONFIRM_SCANS
+        )
+        self.declare_parameter(
+            'lidar_clear_confirm_scans', LIDAR_CLEAR_CONFIRM_SCANS
         )
         self.declare_parameter(
             'lane_change_max_per_direction',
@@ -115,6 +133,11 @@ class MissionLaneMainNode(Node):
         self.declare_parameter('debug_window_name', DEBUG_WINDOW_NAME)
         self.declare_parameter(
             'traffic_light_debug_window_name', TRAFFIC_LIGHT_DEBUG_WINDOW_NAME
+        )
+        self.declare_parameter('lidar_debug_window_name', LIDAR_DEBUG_WINDOW_NAME)
+        self.declare_parameter('lidar_debug_image_size', LIDAR_DEBUG_IMAGE_SIZE)
+        self.declare_parameter(
+            'lidar_debug_max_range_m', LIDAR_DEBUG_MAX_RANGE_M
         )
         self.declare_parameter(
             'traffic_light_roi_height_ratio', TRAFFIC_LIGHT_ROI_HEIGHT_RATIO
@@ -174,25 +197,34 @@ class MissionLaneMainNode(Node):
             )
             driving_mode = '2lane'
         self.lane_number = 1 if driving_mode == '1lane' else 2
-        self.lane_change_close_distance = max(
-            0.0,
-            float(self.get_parameter('lane_change_close_distance').value),
+        self.scan_topic = str(self.get_parameter('scan_topic').value)
+        self.lidar_right_angle_min_deg = float(
+            self.get_parameter('lidar_right_angle_min_deg').value
         )
-        self.lane_change_clear_distance = max(
-            self.lane_change_close_distance,
-            float(self.get_parameter('lane_change_clear_distance').value),
+        self.lidar_right_angle_max_deg = float(
+            self.get_parameter('lidar_right_angle_max_deg').value
         )
-        self.lane_change_close_confirm_samples = max(
-            1,
-            int(self.get_parameter('lane_change_close_confirm_samples').value),
+        self.lidar_left_angle_min_deg = float(
+            self.get_parameter('lidar_left_angle_min_deg').value
         )
-        self.lane_change_clear_confirm_samples = max(
-            1,
-            int(self.get_parameter('lane_change_clear_confirm_samples').value),
+        self.lidar_left_angle_max_deg = float(
+            self.get_parameter('lidar_left_angle_max_deg').value
         )
-        self.lane_change_cooldown_sec = max(
-            0.0,
-            float(self.get_parameter('lane_change_cooldown_sec').value),
+        self.lidar_overtake_max_distance_m = max(
+            0.01,
+            float(self.get_parameter('lidar_overtake_max_distance_m').value),
+        )
+        self.lidar_overtake_clear_distance_m = max(
+            self.lidar_overtake_max_distance_m,
+            float(
+                self.get_parameter('lidar_overtake_clear_distance_m').value
+            ),
+        )
+        self.lidar_detect_confirm_scans = max(
+            1, int(self.get_parameter('lidar_detect_confirm_scans').value)
+        )
+        self.lidar_clear_confirm_scans = max(
+            1, int(self.get_parameter('lidar_clear_confirm_scans').value)
         )
         self.lane_change_max_per_direction = max(
             0,
@@ -204,6 +236,16 @@ class MissionLaneMainNode(Node):
         )
         self.traffic_light_debug_window_name = str(
             self.get_parameter('traffic_light_debug_window_name').value
+        )
+        self.lidar_debug_window_name = str(
+            self.get_parameter('lidar_debug_window_name').value
+        )
+        self.lidar_debug_image_size = max(
+            320, int(self.get_parameter('lidar_debug_image_size').value)
+        )
+        self.lidar_debug_max_range_m = max(
+            self.lidar_overtake_max_distance_m,
+            float(self.get_parameter('lidar_debug_max_range_m').value),
         )
         self.traffic_light_roi_height_ratio = float(np.clip(
             self.get_parameter('traffic_light_roi_height_ratio').value,
@@ -313,17 +355,15 @@ class MissionLaneMainNode(Node):
         )
         self.lane_info_pub = self.create_publisher(Int16, LANE_INFO_TOPIC, 10)
         self.create_subscription(Image, LOW_IMAGE_TOPIC, self.low_image_callback, qos)
-        for sensor_index, topic in enumerate(ULTRASONIC_TOPICS, start=1):
-            self.create_subscription(
-                Range,
-                topic,
-                lambda msg, index=sensor_index: self.ultrasonic_callback(
-                    msg, index
-                ),
-                10,
-            )
+        self.create_subscription(LaserScan, self.scan_topic, self.scan_callback, qos)
         self.create_subscription(
             Int16, LANE_OFFSET_TOPIC, self.lane_offset_callback, 10
+        )
+        self.create_subscription(
+            Int16,
+            LANE_CHANGE_COMPLETE_TOPIC,
+            self.lane_change_complete_callback,
+            10,
         )
 
         self.low_image = None
@@ -335,11 +375,15 @@ class MissionLaneMainNode(Node):
         self.green_straight_active = False
         self.green_straight_deadline_ns = None
         self.last_lane_offset = None
-        self.ultrasonic_ranges = {}
         self.lane_change_armed = False
-        self.close_sample_count = 0
+        self.detect_sample_count = 0
         self.clear_sample_count = 0
-        self.last_lane_change_ns = None
+        self.lidar_object_detected = False
+        self.lidar_sector_state = 'NO DATA'
+        self.lidar_sector_min_distance = None
+        self.lidar_sector_point_count = 0
+        self.latest_scan = None
+        self.pending_lane_change_target = None
         self.lane_change_counts = {(1, 2): 0, (2, 1): 0}
         # lane_offset 노드가 어느 순서로 시작해도 현재 모드를 받을 수 있도록
         # 주기적으로 lane_info를 발행한다.
@@ -347,7 +391,7 @@ class MissionLaneMainNode(Node):
         self.create_timer(0.05, self.update_green_straight_mode)
 
         self.get_logger().info(
-            f'Subscribing {LOW_IMAGE_TOPIC}, {ULTRASONIC_TOPICS}, '
+            f'Subscribing {LOW_IMAGE_TOPIC}, {self.scan_topic}, '
             f'{LANE_OFFSET_TOPIC}; publishing {LANE_INFO_TOPIC}, '
             f'{MOTOR_CONTROL_TOPIC}; starting in {self.driving_mode}'
         )
@@ -419,19 +463,52 @@ class MissionLaneMainNode(Node):
             self.show_debug_view(frame)
             self.show_traffic_light_debug(frame, red_mask, green_mask)
 
-    def ultrasonic_callback(self, msg, sensor_index):
-        distance = float(msg.range)
-        self.ultrasonic_ranges[sensor_index] = distance
-        self.update_lane_change(sensor_index, distance)
+    def scan_callback(self, msg):
+        """Use the current lane's side sector to detect an overtaken object."""
+        self.latest_scan = msg
+        close, clear, min_distance, point_count = self.observe_overtake_sector(msg)
+        self.lidar_object_detected = close
+        self.lidar_sector_state = 'CLOSE' if close else 'CLEAR' if clear else 'MID'
+        self.lidar_sector_min_distance = min_distance
+        self.lidar_sector_point_count = point_count
+        self.update_lane_change(close, clear)
+        if self.debug_view:
+            self.show_lidar_debug(msg)
 
-    def update_lane_change(self, sensor_index, distance):
-        """연속 근접 후 연속 이탈한 물체를 추월한 것으로 보고 차선을 전환한다."""
-        cooldown_remaining = self.lane_change_cooldown_remaining_sec()
-        if cooldown_remaining > 0.0:
-            # 변경 직후 반대편 센서가 같은 장애물을 다시 감지해 원래 차선으로
-            # 즉시 돌아가는 것을 막는다. 쿨다운 중 표본은 다음 변경에 넘기지 않는다.
+    def observe_overtake_sector(self, msg):
+        angle_min_deg, angle_max_deg = self.active_lidar_sector_deg()
+        distances = []
+        usable_max = float(msg.range_max)
+        for index, raw_distance in enumerate(msg.ranges):
+            distance = float(raw_distance)
+            if not math.isfinite(distance):
+                continue
+            if distance < float(msg.range_min) or distance > usable_max:
+                continue
+            angle = float(msg.angle_min) + index * float(msg.angle_increment)
+            angle_deg = math.degrees(math.atan2(math.sin(angle), math.cos(angle)))
+            if angle_min_deg <= angle_deg <= angle_max_deg:
+                distances.append(distance)
+
+        if not distances:
+            return False, True, None, 0
+        min_distance = min(distances)
+        close = min_distance <= self.lidar_overtake_max_distance_m
+        clear = min_distance > self.lidar_overtake_clear_distance_m
+        return close, clear, min_distance, len(distances)
+
+    def active_lidar_sector_deg(self):
+        if self.lane_number == 2:
+            return self.lidar_left_angle_min_deg, self.lidar_left_angle_max_deg
+        return self.lidar_right_angle_min_deg, self.lidar_right_angle_max_deg
+
+    def update_lane_change(self, close, clear):
+        """Change lanes after a side LiDAR object is seen and then disappears."""
+        if self.pending_lane_change_target is not None:
+            # 초 단위 쿨다운 대신, offset 노드가 목표 차선의 색상 경계
+            # 흰 실선을 확인할 때까지 다음 차선 변경 판정을 잠근다.
             self.lane_change_armed = False
-            self.close_sample_count = 0
+            self.detect_sample_count = 0
             self.clear_sample_count = 0
             return False
 
@@ -441,63 +518,49 @@ class MissionLaneMainNode(Node):
         )
         if not self.lane_change_direction_available(transition):
             self.lane_change_armed = False
-            self.close_sample_count = 0
-            self.clear_sample_count = 0
-            return False
-
-        # 기존 3/4번 추월 감지는 일단 비활성화한다.
-        # active_sensor = 3 if self.lane_number == 2 else 4
-        # 2차선에서는 1번, 1차선에서는 2번 초음파로 옆 장애물 통과를 본다.
-        active_sensor = 1 if self.lane_number == 2 else 2
-        if sensor_index != active_sensor:
-            return False
-
-        # timeout/no-echo는 ultrasonic_node에서 +inf로 정규화된다. 근접 물체가
-        # 센서 범위 밖으로 완전히 사라진 것이므로, armed 이후에는 +inf도
-        # LANE_CHANGE_CLEAR_DISTANCE보다 먼 CLEAR 측정으로 사용한다.
-        # NaN과 음수(-inf 포함)만 잘못된 측정으로 제외한다.
-        if math.isnan(distance) or distance < 0.0:
-            self.close_sample_count = 0
+            self.detect_sample_count = 0
             self.clear_sample_count = 0
             return False
 
         if not self.lane_change_armed:
-            if distance <= self.lane_change_close_distance:
-                self.close_sample_count += 1
+            if close:
+                self.detect_sample_count += 1
             else:
-                self.close_sample_count = 0
+                self.detect_sample_count = 0
 
             if (
-                self.close_sample_count
-                >= self.lane_change_close_confirm_samples
+                self.detect_sample_count
+                >= self.lidar_detect_confirm_scans
             ):
                 self.lane_change_armed = True
-                self.close_sample_count = 0
+                self.detect_sample_count = 0
                 self.clear_sample_count = 0
+                sector_min, sector_max = self.active_lidar_sector_deg()
                 self.get_logger().info(
-                    f'{self.driving_mode}: ultrasonic {active_sensor} '
-                    f'close confirmed ({distance:.2f} m); lane change armed'
+                    f'{self.driving_mode}: LiDAR object confirmed in '
+                    f'{sector_min:+.0f}..{sector_max:+.0f} deg within '
+                    f'{self.lidar_overtake_max_distance_m:.2f} m; '
+                    'lane change armed'
                 )
             return False
 
-        if distance > self.lane_change_clear_distance:
+        if clear:
             self.clear_sample_count += 1
         else:
             self.clear_sample_count = 0
 
-        if self.clear_sample_count >= self.lane_change_clear_confirm_samples:
+        if self.clear_sample_count >= self.lidar_clear_confirm_scans:
             previous_mode = self.driving_mode
             previous_lane = self.lane_number
             self.lane_number = 1 if self.lane_number == 2 else 2
             self.lane_change_counts[(previous_lane, self.lane_number)] += 1
-            self.last_lane_change_ns = self.get_clock().now().nanoseconds
+            self.pending_lane_change_target = self.lane_number
             self.lane_change_armed = False
-            self.close_sample_count = 0
+            self.detect_sample_count = 0
             self.clear_sample_count = 0
             self.publish_lane_info()
             self.get_logger().info(
-                f'Lane change trigger: ultrasonic {active_sensor} '
-                f'clear confirmed ({distance:.2f} m); '
+                'Lane change trigger: LiDAR side object disappeared; '
                 f'{previous_mode} -> {self.driving_mode}'
             )
             return True
@@ -515,13 +578,19 @@ class MissionLaneMainNode(Node):
             < self.lane_change_max_per_direction
         )
 
-    def lane_change_cooldown_remaining_sec(self):
-        """최근 차선 변경 이후 남은 잠금 시간을 초 단위로 반환한다."""
-        if self.last_lane_change_ns is None:
-            return 0.0
-        now_ns = self.get_clock().now().nanoseconds
-        elapsed_sec = max(0.0, (now_ns - self.last_lane_change_ns) / 1e9)
-        return max(0.0, self.lane_change_cooldown_sec - elapsed_sec)
+    def lane_change_complete_callback(self, msg):
+        """Unlock changes after offset acquires the destination boundary line."""
+        completed_lane = int(msg.data)
+        if completed_lane != self.pending_lane_change_target:
+            return
+        self.pending_lane_change_target = None
+        self.lane_change_armed = False
+        self.detect_sample_count = 0
+        self.clear_sample_count = 0
+        self.get_logger().info(
+            f'Lane {completed_lane} boundary line acquired; '
+            'next lane-change detection unlocked'
+        )
 
     def lane_offset_callback(self, msg):
         offset = int(msg.data)
@@ -710,11 +779,9 @@ class MissionLaneMainNode(Node):
         self.lane_info_pub.publish(lane_info)
 
     def show_debug_view(self, frame):
-        """저해상도 카메라 위에 미션 차선 및 1/2번 초음파 상태를 표시한다."""
+        """저해상도 카메라 위에 미션 차선과 LiDAR 추월 상태를 표시한다."""
         debug = frame.copy()
-        # 기존 3/4번 표시도 추월 감지와 함께 일단 비활성화한다.
-        # active_sensor = 3 if self.lane_number == 2 else 4
-        active_sensor = 1 if self.lane_number == 2 else 2
+        sector_min, sector_max = self.active_lidar_sector_deg()
         panel_height = min(debug.shape[0], 225)
         panel_width = min(debug.shape[1], 640)
         overlay = debug.copy()
@@ -723,9 +790,8 @@ class MissionLaneMainNode(Node):
         )
         cv2.addWeighted(overlay, 0.65, debug, 0.35, 0.0, debug)
 
-        cooldown_remaining = self.lane_change_cooldown_remaining_sec()
-        if cooldown_remaining > 0.0:
-            state = f'COOLDOWN: {cooldown_remaining:.1f} SEC'
+        if self.pending_lane_change_target is not None:
+            state = f'WAIT LANE {self.pending_lane_change_target} BOUNDARY LINE'
         elif not self.lane_change_direction_available():
             next_lane = 1 if self.lane_number == 2 else 2
             state = f'LIMIT: {self.lane_number}->{next_lane} USED'
@@ -744,23 +810,30 @@ class MissionLaneMainNode(Node):
         lines = [
             ('MISSION LANE MAIN', (255, 255, 255)),
             (
-                f'mode: {self.driving_mode}  active ultrasonic: {active_sensor}',
+                f'mode: {self.driving_mode}  lidar: '
+                f'{sector_min:+.0f}..{sector_max:+.0f} deg',
                 (0, 255, 255),
             ),
-            self.ultrasonic_debug_line(1, active_sensor),
-            self.ultrasonic_debug_line(2, active_sensor),
-            # self.ultrasonic_debug_line(3, active_sensor),
-            # self.ultrasonic_debug_line(4, active_sensor),
             (
-                f'state: {state}  close={self.close_sample_count}/'
-                f'{self.lane_change_close_confirm_samples}  '
+                f'lidar sector: {self.lidar_sector_state}  '
+                f'min={self.format_lidar_distance()}  '
+                f'points={self.lidar_sector_point_count}',
+                (
+                    (0, 0, 255) if self.lidar_sector_state == 'CLOSE'
+                    else (0, 255, 255) if self.lidar_sector_state == 'MID'
+                    else (0, 255, 0)
+                ),
+            ),
+            (
+                f'state: {state}  detect={self.detect_sample_count}/'
+                f'{self.lidar_detect_confirm_scans}  '
                 f'clear={self.clear_sample_count}/'
-                f'{self.lane_change_clear_confirm_samples}',
+                f'{self.lidar_clear_confirm_scans}',
                 (0, 255, 0) if self.lane_change_armed else (255, 255, 255),
             ),
             (
-                f'thresholds: close<={self.lane_change_close_distance:.2f}m  '
-                f'clear>{self.lane_change_clear_distance:.2f}m',
+                f'lidar: close<={self.lidar_overtake_max_distance_m:.2f}m  '
+                f'clear>{self.lidar_overtake_clear_distance_m:.2f}m',
                 (200, 200, 200),
             ),
             (
@@ -795,37 +868,131 @@ class MissionLaneMainNode(Node):
         cv2.imshow(self.debug_window_name, debug)
         cv2.waitKey(1)
 
-    def ultrasonic_debug_line(self, sensor_index, active_sensor):
-        distance = self.ultrasonic_ranges.get(sensor_index)
-        active_text = 'ACTIVE' if sensor_index == active_sensor else 'standby'
-        if distance is None:
-            value_text = '--'
-            state_text = 'NO DATA'
-            color = (128, 128, 128)
-        elif math.isnan(distance) or distance < 0.0:
-            value_text = 'NAN' if math.isnan(distance) else 'INVALID'
-            state_text = 'INVALID'
-            color = (0, 0, 255)
-        elif math.isinf(distance):
-            value_text = 'INF'
-            state_text = 'CLEAR'
-            color = (0, 255, 0)
-        elif distance <= self.lane_change_close_distance:
-            value_text = f'{distance:.2f} m'
-            state_text = 'CLOSE'
-            color = (0, 0, 255)
-        elif distance > self.lane_change_clear_distance:
-            value_text = f'{distance:.2f} m'
-            state_text = 'CLEAR'
-            color = (0, 255, 0)
-        else:
-            value_text = f'{distance:.2f} m'
-            state_text = 'MID'
-            color = (0, 255, 255)
-        return (
-            f'ultrasonic {sensor_index}: {value_text}  [{state_text}, {active_text}]',
-            color,
+    def format_lidar_distance(self):
+        if self.lidar_sector_min_distance is None:
+            return '--'
+        return f'{self.lidar_sector_min_distance:.2f}m'
+
+    def show_lidar_debug(self, msg):
+        """Draw all scan points and overlay only the active overtake sector."""
+        size = self.lidar_debug_image_size
+        center = size // 2
+        scale = size * 0.44 / self.lidar_debug_max_range_m
+        image = np.zeros((size, size, 3), dtype=np.uint8)
+
+        # 현재 차선에서 쓰는 10도 구간만 표시한다. 1.0m 영역은 CLEAR
+        # 판정 경계, 그 안의 0.7m 영역은 CLOSE 판정 범위다.
+        angle_min_deg, angle_max_deg = self.active_lidar_sector_deg()
+        overlay = image.copy()
+        self.fill_lidar_sector(
+            overlay,
+            center,
+            scale,
+            angle_min_deg,
+            angle_max_deg,
+            self.lidar_overtake_clear_distance_m,
+            (0, 120, 160),
         )
+        self.fill_lidar_sector(
+            overlay,
+            center,
+            scale,
+            angle_min_deg,
+            angle_max_deg,
+            self.lidar_overtake_max_distance_m,
+            (0, 0, 220),
+        )
+        cv2.addWeighted(overlay, 0.28, image, 0.72, 0.0, image)
+
+        for distance_m, color in (
+            (self.lidar_overtake_max_distance_m, (0, 80, 255)),
+            (self.lidar_overtake_clear_distance_m, (0, 200, 255)),
+        ):
+            arc = self.lidar_arc_points(
+                center, scale, angle_min_deg, angle_max_deg, distance_m
+            )
+            cv2.polylines(image, [arc], False, color, 2, cv2.LINE_AA)
+
+        nearest_point = None
+        nearest_distance = math.inf
+        for index, raw_distance in enumerate(msg.ranges):
+            distance = float(raw_distance)
+            if not math.isfinite(distance):
+                continue
+            if distance < float(msg.range_min) or distance > min(
+                float(msg.range_max), self.lidar_debug_max_range_m
+            ):
+                continue
+            angle = float(msg.angle_min) + index * float(msg.angle_increment)
+            angle = math.atan2(math.sin(angle), math.cos(angle))
+            angle_deg = math.degrees(angle)
+            in_sector = angle_min_deg <= angle_deg <= angle_max_deg
+            point = self.lidar_pixel(center, scale, angle, distance)
+            color = (100, 100, 100)
+            radius = 1
+            if in_sector:
+                if distance <= self.lidar_overtake_max_distance_m:
+                    color = (0, 0, 255)
+                elif distance <= self.lidar_overtake_clear_distance_m:
+                    color = (0, 255, 255)
+                else:
+                    color = (255, 180, 0)
+                radius = 2
+                if distance < nearest_distance:
+                    nearest_distance = distance
+                    nearest_point = point
+            cv2.circle(image, point, radius, color, -1)
+
+        if nearest_point is not None:
+            cv2.circle(image, nearest_point, 7, (255, 255, 255), 2)
+        cv2.line(image, (center, 16), (center, size - 16), (50, 50, 50), 1)
+        cv2.line(image, (16, center), (size - 16, center), (50, 50, 50), 1)
+        cv2.circle(image, (center, center), 7, (0, 255, 0), -1)
+        cv2.arrowedLine(
+            image, (center, center), (center, 28), (0, 255, 0), 2, tipLength=0.1
+        )
+
+        lines = [
+            f'{self.driving_mode}: {angle_min_deg:+.0f}..{angle_max_deg:+.0f} deg',
+            f'min={self.format_lidar_distance()}  state={self.lidar_sector_state}',
+            (
+                f'CLOSE <= {self.lidar_overtake_max_distance_m:.2f}m  '
+                f'CLEAR > {self.lidar_overtake_clear_distance_m:.2f}m'
+            ),
+            'REAR 0 | RIGHT +90 | FRONT +/-180 | LEFT -90',
+        ]
+        for index, text in enumerate(lines):
+            cv2.putText(
+                image, text, (14, 24 + index * 22),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.52, (230, 230, 230), 1,
+                cv2.LINE_AA,
+            )
+        cv2.imshow(self.lidar_debug_window_name, image)
+        cv2.waitKey(1)
+
+    @staticmethod
+    def lidar_pixel(center, scale, angle, distance):
+        return (
+            int(round(center + math.sin(angle) * distance * scale)),
+            int(round(center + math.cos(angle) * distance * scale)),
+        )
+
+    def lidar_arc_points(
+        self, center, scale, angle_min_deg, angle_max_deg, distance
+    ):
+        return np.array([
+            self.lidar_pixel(center, scale, math.radians(angle_deg), distance)
+            for angle_deg in np.linspace(angle_min_deg, angle_max_deg, 32)
+        ], dtype=np.int32)
+
+    def fill_lidar_sector(
+        self, image, center, scale, angle_min_deg, angle_max_deg, distance, color
+    ):
+        arc = self.lidar_arc_points(
+            center, scale, angle_min_deg, angle_max_deg, distance
+        )
+        polygon = np.vstack((np.array([[center, center]], dtype=np.int32), arc))
+        cv2.fillPoly(image, [polygon], color)
 
     def to_bgr(self, msg):
         data = np.frombuffer(msg.data, dtype=np.uint8)
