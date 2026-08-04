@@ -8,11 +8,14 @@ at an explicit 0-degree steering target and, when the first parked vehicle is
 confirmed, performs a calibrated left turn. LiDAR
 then confirms that both parked vehicles are visible and performs one-second
 midpoint-angle corrections while reversing. Once either parked vehicle enters
-the 1 m ring, the controller stops for five seconds. Its first final segment
-chooses either the red/green line error or the two vehicles' mean tilt for
-0.5 seconds, stops and independently repeats that decision for a second
-0.5-second segment, then reverses continuously only after stopping and
-centering the steering at zero.
+the 1 m ring, the controller stops for five seconds. Precision reverse starts
+after that stop. A selected slot-2 or slot-3 high-camera template detects the
+top horizontal white line and its calibrated longitudinal branch/corner. Their
+two angle errors and the corner's horizontal position have priority over LiDAR
+steering. Otherwise the existing red/green line or parked-vehicle tilt
+correction is used. After two initial 0.5-second corrections the controller
+stops and centers steering, then reverses continuously; white-line guidance
+still takes priority if the lines first appear during that motion.
 Parking completes when either original parked vehicle, not a later pillar or
 unit, disappears below the rear-mounted LiDAR's horizontal x=0 line.
 After a two-second parked hold, the controller executes the timed exit
@@ -33,7 +36,8 @@ import cv2
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import LaserScan
+from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
+from sensor_msgs.msg import Image, LaserScan
 from std_msgs.msg import Int16MultiArray
 
 
@@ -96,14 +100,37 @@ class LidarObservation:
     pair_is_fallback: bool = False
 
 
+@dataclass
+class ParkingLineObservation:
+    valid: bool
+    stamp: float
+    horizontal_line: Optional[tuple[float, float, float, float]] = None
+    guide_line: Optional[tuple[float, float, float, float]] = None
+    anchor_point: Optional[tuple[float, float]] = None
+    horizontal_angle_error_deg: float = 0.0
+    guide_angle_error_deg: float = 0.0
+    anchor_x_error: float = 0.0
+    anchor_y_error: float = 0.0
+    steering_deg: int = 0
+    confidence: float = 0.0
+
+
 class ParkingNodeYym(Node):
     """LiDAR-feedback parking into random right-side slot 2 or 3."""
 
     def __init__(self) -> None:
         super().__init__('parking_node_yym')
 
+        slot_from_environment = os.environ.get('PARKING_SLOT_NUMBER', '2')
+        parking_slot_default = (
+            int(slot_from_environment)
+            if slot_from_environment in ('2', '3')
+            else 2
+        )
+
         self.declare_parameter('scan_topic', '/scan')
         self.declare_parameter('motor_topic', '/motor_control')
+        self.declare_parameter('high_camera_topic', '/camera/high/image_raw')
         self.declare_parameter('control_hz', 20.0)
         self.declare_parameter('scan_timeout_sec', 0.5)
         self.declare_parameter('scan_quality_min_points', 10)
@@ -157,6 +184,7 @@ class ParkingNodeYym(Node):
         self.declare_parameter('lidar_side_far_half_width_deg', 5.0)
         self.declare_parameter('lidar_side_far_confirm_frames', 3)
         self.declare_parameter('lidar_side_far_stop_sec', 4.0)
+        self.declare_parameter('enable_exit_sequence', False)
         self.declare_parameter('exit_wait_after_park_sec', 2.0)
         self.declare_parameter('exit_forward_duration_sec', 3.0)
         self.declare_parameter('exit_right_turn_duration_sec', 8.0)
@@ -170,6 +198,32 @@ class ParkingNodeYym(Node):
         self.declare_parameter('final_line_alignment_tolerance_deg', 5.0)
         self.declare_parameter('final_correction_duration_sec', 0.5)
         self.declare_parameter('final_correction_segment_count', 2)
+        # Precision reverse begins only after the five-second final stop.
+        # A valid pair of white parking lines overrides LiDAR guidance.
+        self.declare_parameter('precision_camera_enabled', True)
+        self.declare_parameter('parking_slot_number', parking_slot_default)
+        self.declare_parameter('precision_camera_timeout_sec', 0.5)
+        self.declare_parameter('precision_camera_confirm_frames', 1)
+        self.declare_parameter('precision_white_value_min', 170)
+        self.declare_parameter('precision_white_saturation_max', 80)
+        self.declare_parameter('precision_camera_roi_top_ratio', 0.00)
+        self.declare_parameter('precision_camera_roi_bottom_ratio', 0.20)
+        self.declare_parameter('precision_camera_center_x_ratio', 0.50)
+        self.declare_parameter('precision_horizontal_max_angle_deg', 12.0)
+        self.declare_parameter('precision_horizontal_min_length_ratio', 0.30)
+        self.declare_parameter('precision_guide_min_height_ratio', 0.025)
+        self.declare_parameter('precision_guide_max_angle_deg', 55.0)
+        self.declare_parameter('precision_slot2_target_x_ratio', 0.500)
+        self.declare_parameter('precision_slot2_target_y_ratio', 0.052)
+        self.declare_parameter('precision_slot2_guide_angle_deg', 0.0)
+        self.declare_parameter('precision_slot3_target_x_ratio', 0.690)
+        self.declare_parameter('precision_slot3_target_y_ratio', 0.052)
+        self.declare_parameter('precision_slot3_guide_angle_deg', -33.0)
+        self.declare_parameter('precision_horizontal_target_angle_deg', 0.0)
+        self.declare_parameter('precision_horizontal_angle_gain', 0.8)
+        self.declare_parameter('precision_guide_angle_gain', 0.8)
+        self.declare_parameter('precision_anchor_x_gain_deg', 40.0)
+        self.declare_parameter('precision_camera_steering_sign', 1.0)
         self.declare_parameter('steer_settle_sec', 0.6)
         # Recognition test: after steering settles at -45 degrees, drive for
         # this calibrated duration with maximum left steering, then stop.
@@ -215,6 +269,7 @@ class ParkingNodeYym(Node):
 
         self.scan_topic = str(self._value('scan_topic'))
         self.motor_topic = str(self._value('motor_topic'))
+        self.high_camera_topic = str(self._value('high_camera_topic'))
         self.control_hz = max(1.0, float(self._value('control_hz')))
         self.scan_timeout = max(0.05, float(self._value('scan_timeout_sec')))
         self.scan_quality_min_points = int(self._value('scan_quality_min_points'))
@@ -307,6 +362,9 @@ class ParkingNodeYym(Node):
         self.lidar_side_far_stop = max(
             0.0, float(self._value('lidar_side_far_stop_sec'))
         )
+        self.enable_exit_sequence = bool(
+            self._value('enable_exit_sequence')
+        )
         self.exit_wait_after_park = max(
             0.0, float(self._value('exit_wait_after_park_sec'))
         )
@@ -338,6 +396,92 @@ class ParkingNodeYym(Node):
         )
         self.final_correction_segment_count = max(
             1, int(self._value('final_correction_segment_count'))
+        )
+        self.precision_camera_enabled = bool(
+            self._value('precision_camera_enabled')
+        )
+        self.parking_slot_number = int(self._value('parking_slot_number'))
+        if self.parking_slot_number not in (2, 3):
+            self.get_logger().warn(
+                f'parking_slot_number={self.parking_slot_number} is invalid; '
+                'using slot 2'
+            )
+            self.parking_slot_number = 2
+        self.precision_camera_timeout = max(
+            0.05, float(self._value('precision_camera_timeout_sec'))
+        )
+        self.precision_camera_confirm_frames = max(
+            1, int(self._value('precision_camera_confirm_frames'))
+        )
+        self.precision_white_value_min = int(np.clip(
+            self._value('precision_white_value_min'), 0, 255
+        ))
+        self.precision_white_saturation_max = int(np.clip(
+            self._value('precision_white_saturation_max'), 0, 255
+        ))
+        self.precision_camera_roi_top = float(np.clip(
+            self._value('precision_camera_roi_top_ratio'), 0.0, 0.90
+        ))
+        self.precision_camera_roi_bottom = float(np.clip(
+            self._value('precision_camera_roi_bottom_ratio'),
+            self.precision_camera_roi_top + 0.05,
+            1.0,
+        ))
+        self.precision_camera_center_x = float(np.clip(
+            self._value('precision_camera_center_x_ratio'), 0.20, 0.80
+        ))
+        self.precision_horizontal_max_angle = max(
+            1.0, float(self._value('precision_horizontal_max_angle_deg'))
+        )
+        self.precision_horizontal_min_length = float(np.clip(
+            self._value('precision_horizontal_min_length_ratio'), 0.10, 0.90
+        ))
+        self.precision_guide_min_height = float(np.clip(
+            self._value('precision_guide_min_height_ratio'), 0.01, 0.30
+        ))
+        self.precision_guide_max_angle = max(
+            5.0, float(self._value('precision_guide_max_angle_deg'))
+        )
+        if self.parking_slot_number == 2:
+            self.precision_target_x = float(
+                self._value('precision_slot2_target_x_ratio')
+            )
+            self.precision_target_y = float(
+                self._value('precision_slot2_target_y_ratio')
+            )
+            self.precision_target_guide_angle = float(
+                self._value('precision_slot2_guide_angle_deg')
+            )
+        else:
+            self.precision_target_x = float(
+                self._value('precision_slot3_target_x_ratio')
+            )
+            self.precision_target_y = float(
+                self._value('precision_slot3_target_y_ratio')
+            )
+            self.precision_target_guide_angle = float(
+                self._value('precision_slot3_guide_angle_deg')
+            )
+        self.precision_target_x = float(np.clip(
+            self.precision_target_x, 0.05, 0.95
+        ))
+        self.precision_target_y = float(np.clip(
+            self.precision_target_y, 0.0, 0.50
+        ))
+        self.precision_horizontal_target_angle = float(
+            self._value('precision_horizontal_target_angle_deg')
+        )
+        self.precision_horizontal_angle_gain = float(
+            self._value('precision_horizontal_angle_gain')
+        )
+        self.precision_guide_angle_gain = float(
+            self._value('precision_guide_angle_gain')
+        )
+        self.precision_anchor_x_gain_deg = float(
+            self._value('precision_anchor_x_gain_deg')
+        )
+        self.precision_camera_steering_sign = float(
+            self._value('precision_camera_steering_sign')
         )
         self.steer_settle_sec = float(self._value('steer_settle_sec'))
         self.left_turn_duration_sec = max(
@@ -448,12 +592,26 @@ class ParkingNodeYym(Node):
         self.gap_frames = 0
         self.latest_scan: Optional[LaserScan] = None
         self.observation = self._empty_observation()
+        self.parking_line_observation = ParkingLineObservation(False, 0.0)
+        self.precision_camera_valid_frames = 0
+        self.precision_camera_debug_image: Optional[np.ndarray] = None
 
         self.motor_publisher = self.create_publisher(
             Int16MultiArray, self.motor_topic, 10
         )
         self.create_subscription(
             LaserScan, self.scan_topic, self.scan_callback, 10
+        )
+        camera_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+        )
+        self.create_subscription(
+            Image,
+            self.high_camera_topic,
+            self.high_camera_callback,
+            camera_qos,
         )
         self.create_timer(1.0 / self.control_hz, self.control_tick)
         if self.debug_view:
@@ -472,11 +630,15 @@ class ParkingNodeYym(Node):
             f'{self.straight_reverse_stop:.1f}s '
             f'-> {self.final_correction_segment_count} x '
             f'{self.final_correction_duration:.1f}s '
-            f'conditional corrections (line tolerance +/-'
+            f'conditional corrections (LiDAR line tolerance +/-'
             f'{self.final_line_alignment_tolerance:.1f}deg) '
+            f'with slot-{self.parking_slot_number} high-camera white-line '
+            f'template priority on '
+            f'{self.high_camera_topic} '
             '-> mandatory stop + steer=0 settle '
             '-> steer=0 continuous reverse '
             '-> either original vehicle clears line -> PARKED '
+            f'-> exit_enabled={self.enable_exit_sequence} '
             f'-> wait {self.exit_wait_after_park:.1f}s '
             f'-> forward {self.exit_forward_duration:.1f}s '
             f'-> max-right {self.exit_right_turn_duration:.1f}s '
@@ -561,6 +723,427 @@ class ParkingNodeYym(Node):
             )
         else:
             self.gap_frames = 0
+
+    def high_camera_callback(self, msg: Image) -> None:
+        """Detect both white slot lines only during precision reverse."""
+        now = time.monotonic()
+        if not self.precision_camera_enabled:
+            return
+        try:
+            frame = self.camera_image_to_bgr(msg)
+        except (ValueError, cv2.error) as error:
+            self.get_logger().warning(
+                f'High-camera conversion failed: {error}',
+                throttle_duration_sec=2.0,
+            )
+            self.parking_line_observation = ParkingLineObservation(False, now)
+            self.precision_camera_valid_frames = 0
+            return
+
+        # Merely subscribing to the camera must not alter any behavior before
+        # the existing five-second stop has completed.
+        if (
+            self.state != ParkingState.REVERSE_CENTER
+            or not self.straight_reverse_started
+        ):
+            self.parking_line_observation = ParkingLineObservation(False, now)
+            self.precision_camera_valid_frames = 0
+            if self.debug_view:
+                self.precision_camera_debug_image = frame.copy()
+            return
+
+        observation, debug_image = self.detect_parking_lines(frame, now)
+        if observation.valid:
+            self.precision_camera_valid_frames += 1
+        else:
+            self.precision_camera_valid_frames = 0
+        observation.valid = (
+            observation.valid
+            and self.precision_camera_valid_frames
+            >= self.precision_camera_confirm_frames
+        )
+        self.parking_line_observation = observation
+        if self.debug_view:
+            self.precision_camera_debug_image = debug_image
+
+    @staticmethod
+    def camera_image_to_bgr(msg: Image) -> np.ndarray:
+        """Convert the encodings published by sensor_topic to BGR."""
+        data = np.frombuffer(msg.data, dtype=np.uint8)
+        if msg.encoding in ('yuv422_yuy2', 'yuyv', 'yuyv422'):
+            yuyv = data.reshape((msg.height, msg.width, 2))
+            return cv2.cvtColor(yuyv, cv2.COLOR_YUV2BGR_YUY2)
+        if msg.encoding in ('bgr8', '8UC3'):
+            return data.reshape((msg.height, msg.width, 3)).copy()
+        if msg.encoding == 'rgb8':
+            rgb = data.reshape((msg.height, msg.width, 3))
+            return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        if msg.encoding in ('mono8', '8UC1'):
+            mono = data.reshape((msg.height, msg.width))
+            return cv2.cvtColor(mono, cv2.COLOR_GRAY2BGR)
+        raise ValueError(f'unsupported encoding {msg.encoding!r}')
+
+    def detect_parking_lines(
+        self,
+        frame: np.ndarray,
+        stamp: float,
+    ) -> tuple[ParkingLineObservation, np.ndarray]:
+        """Visual-servo toward the selected slot's calibrated line template."""
+        height, width = frame.shape[:2]
+        debug_image = frame.copy()
+        if height < 40 or width < 40:
+            return ParkingLineObservation(False, stamp), debug_image
+
+        roi_top = int(round(height * self.precision_camera_roi_top))
+        roi_bottom = int(round(height * self.precision_camera_roi_bottom))
+        roi_bottom = max(roi_top + 10, min(height, roi_bottom))
+        hsv = cv2.cvtColor(frame[roi_top:roi_bottom], cv2.COLOR_BGR2HSV)
+        white_mask = cv2.inRange(
+            hsv,
+            (0, 0, self.precision_white_value_min),
+            (179, self.precision_white_saturation_max, 255),
+        )
+        white_mask = cv2.morphologyEx(
+            white_mask,
+            cv2.MORPH_CLOSE,
+            cv2.getStructuringElement(cv2.MORPH_RECT, (7, 3)),
+        )
+        white_mask = cv2.morphologyEx(
+            white_mask,
+            cv2.MORPH_OPEN,
+            cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)),
+        )
+
+        full_mask = np.zeros((height, width), dtype=np.uint8)
+        full_mask[roi_top:roi_bottom] = white_mask
+
+        edges = cv2.Canny(full_mask, 50, 150)
+        segments = cv2.HoughLinesP(
+            edges,
+            1,
+            np.pi / 180.0,
+            25,
+            minLineLength=max(
+                20, int(round(width * self.precision_horizontal_min_length))
+            ),
+            maxLineGap=max(10, int(round(width * 0.04))),
+        )
+        horizontal_candidates: list[tuple[float, tuple[int, int, int, int]]] = []
+        if segments is not None:
+            for x1, y1, x2, y2 in segments[:, 0]:
+                dx = float(x2 - x1)
+                dy = float(y2 - y1)
+                length = math.hypot(dx, dy)
+                angle = math.degrees(math.atan2(dy, dx))
+                if angle > 90.0:
+                    angle -= 180.0
+                elif angle < -90.0:
+                    angle += 180.0
+                if abs(angle) <= self.precision_horizontal_max_angle:
+                    target_y = height * self.precision_target_y
+                    center_y = 0.5 * (y1 + y2)
+                    score = length - 0.20 * abs(center_y - target_y)
+                    horizontal_candidates.append(
+                        (score, (int(x1), int(y1), int(x2), int(y2)))
+                    )
+        if not horizontal_candidates:
+            return self.finish_parking_line_debug(
+                ParkingLineObservation(False, stamp),
+                debug_image,
+                full_mask,
+                roi_top,
+                roi_bottom,
+            )
+
+        _, seed_line = max(horizontal_candidates, key=lambda item: item[0])
+        sx1, sy1, sx2, sy2 = seed_line
+        seed_dx = max(float(sx2 - sx1), 1.0)
+        seed_slope = float(sy2 - sy1) / seed_dx
+        seed_intercept = float(sy1) - seed_slope * float(sx1)
+        mask_y, mask_x = np.nonzero(full_mask)
+        horizontal_band = np.abs(
+            mask_y - (seed_slope * mask_x + seed_intercept)
+        ) <= max(4.0, height * 0.012)
+        horizontal_x = mask_x[horizontal_band]
+        horizontal_y = mask_y[horizontal_band]
+        if len(horizontal_x) < 20:
+            return self.finish_parking_line_debug(
+                ParkingLineObservation(False, stamp),
+                debug_image,
+                full_mask,
+                roi_top,
+                roi_bottom,
+            )
+        horizontal_fit = cv2.fitLine(
+            np.column_stack((horizontal_x, horizontal_y)).astype(np.float32),
+            cv2.DIST_HUBER,
+            0,
+            0.01,
+            0.01,
+        ).reshape(-1)
+        hvx, hvy, hx0, hy0 = (float(value) for value in horizontal_fit)
+        if abs(hvx) < 0.20:
+            return self.finish_parking_line_debug(
+                ParkingLineObservation(False, stamp),
+                debug_image,
+                full_mask,
+                roi_top,
+                roi_bottom,
+            )
+        if hvx < 0.0:
+            hvx, hvy = -hvx, -hvy
+        horizontal_slope = hvy / hvx
+        horizontal_intercept = hy0 - horizontal_slope * hx0
+        horizontal_line = (
+            0.0,
+            horizontal_intercept,
+            float(width - 1),
+            horizontal_slope * float(width - 1) + horizontal_intercept,
+        )
+        horizontal_angle = math.degrees(math.atan2(hvy, hvx))
+
+        column_indices = np.arange(width, dtype=np.float32)[None, :]
+        row_indices = np.arange(height, dtype=np.float32)[:, None]
+        horizontal_y_map = (
+            horizontal_slope * column_indices + horizontal_intercept
+        )
+        # Removing the horizontal strip separates each short longitudinal
+        # branch into its own connected component, including the slot-3 corner.
+        guide_mask = np.where(
+            row_indices < horizontal_y_map - max(3.0, height * 0.012),
+            full_mask,
+            0,
+        ).astype(np.uint8)
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(
+            guide_mask, connectivity=8
+        )
+        guide_candidates: list[
+            tuple[
+                float,
+                float,
+                tuple[float, float],
+                tuple[float, float, float, float],
+                float,
+            ]
+        ] = []
+        minimum_area = max(8, int(round(width * height * 0.00003)))
+        minimum_height = max(5.0, height * self.precision_guide_min_height)
+        target_x_px = width * self.precision_target_x
+        for label in range(1, count):
+            _, _, component_width, component_height, area = (
+                int(value) for value in stats[label]
+            )
+            if (
+                area < minimum_area
+                or component_height < minimum_height
+                or component_height < 0.45 * max(component_width, 1)
+            ):
+                continue
+            ys, xs = np.nonzero(labels == label)
+            unique_rows = np.unique(ys)
+            if len(unique_rows) < minimum_height:
+                continue
+            row_centers = np.array([
+                float(np.median(xs[ys == row])) for row in unique_rows
+            ])
+            guide_dx_dy, guide_intercept = np.polyfit(
+                unique_rows.astype(np.float64),
+                row_centers,
+                1,
+            )
+            guide_dx_dy = float(guide_dx_dy)
+            guide_intercept = float(guide_intercept)
+            # The guide vector points upward, hence its image x component is
+            # the negative of dx/dy measured with increasing image y.
+            guide_angle = math.degrees(math.atan2(-guide_dx_dy, 1.0))
+            if abs(guide_angle) > self.precision_guide_max_angle:
+                continue
+            denominator = 1.0 - horizontal_slope * guide_dx_dy
+            if abs(denominator) < 0.05:
+                continue
+            anchor_x = (
+                guide_dx_dy * horizontal_intercept + guide_intercept
+            ) / denominator
+            anchor_y = (
+                horizontal_slope * anchor_x + horizontal_intercept
+            )
+            if not (
+                -0.05 * width <= anchor_x <= 1.05 * width
+                and roi_top - 5 <= anchor_y <= roi_bottom + 5
+            ):
+                continue
+            line_top_y = float(max(roi_top, int(np.min(ys))))
+            line_top_x = guide_dx_dy * line_top_y + guide_intercept
+            score = (
+                component_height / max(height, 1)
+                + 0.25 * area / max(component_width * component_height, 1)
+                - 0.80 * abs(anchor_x - target_x_px) / max(width, 1)
+            )
+            guide_candidates.append((
+                score,
+                guide_angle,
+                (anchor_x, anchor_y),
+                (anchor_x, anchor_y, line_top_x, line_top_y),
+                component_height / max(height, 1),
+            ))
+        horizontal_observation = ParkingLineObservation(
+            False,
+            stamp,
+            horizontal_line=horizontal_line,
+        )
+        if not guide_candidates:
+            return self.finish_parking_line_debug(
+                horizontal_observation,
+                debug_image,
+                full_mask,
+                roi_top,
+                roi_bottom,
+            )
+
+        (
+            _,
+            guide_angle,
+            anchor_point,
+            guide_line,
+            guide_height_ratio,
+        ) = max(guide_candidates, key=lambda item: item[0])
+        anchor_x, anchor_y = anchor_point
+        horizontal_error = (
+            horizontal_angle - self.precision_horizontal_target_angle
+        )
+        guide_error = guide_angle - self.precision_target_guide_angle
+        anchor_x_error = anchor_x / max(width, 1) - self.precision_target_x
+        anchor_y_error = anchor_y / max(height, 1) - self.precision_target_y
+        calculated_steer = self.precision_camera_steering_sign * (
+            self.precision_horizontal_angle_gain * horizontal_error
+            + self.precision_guide_angle_gain * guide_error
+            + self.precision_anchor_x_gain_deg * anchor_x_error
+        )
+        steering = int(round(np.clip(calculated_steer, -45.0, 45.0)))
+        horizontal_span = (
+            float(np.max(horizontal_x) - np.min(horizontal_x))
+            / max(width, 1)
+        )
+        confidence = float(np.clip(
+            min(
+                horizontal_span,
+                guide_height_ratio / max(
+                    2.0 * self.precision_guide_min_height, 0.01
+                ),
+            ),
+            0.0,
+            1.0,
+        ))
+        observation = ParkingLineObservation(
+            True,
+            stamp,
+            horizontal_line=horizontal_line,
+            guide_line=guide_line,
+            anchor_point=anchor_point,
+            horizontal_angle_error_deg=horizontal_error,
+            guide_angle_error_deg=guide_error,
+            anchor_x_error=anchor_x_error,
+            anchor_y_error=anchor_y_error,
+            steering_deg=steering,
+            confidence=confidence,
+        )
+        return self.finish_parking_line_debug(
+            observation,
+            debug_image,
+            full_mask,
+            roi_top,
+            roi_bottom,
+        )
+
+    def finish_parking_line_debug(
+        self,
+        observation: ParkingLineObservation,
+        image: np.ndarray,
+        mask: np.ndarray,
+        roi_top: int,
+        roi_bottom: int,
+    ) -> tuple[ParkingLineObservation, np.ndarray]:
+        """Draw exactly what the precision-reverse camera controller uses."""
+        mask_overlay = np.zeros_like(image)
+        mask_overlay[:, :, 1] = mask
+        image = cv2.addWeighted(image, 1.0, mask_overlay, 0.25, 0.0)
+        height, width = image.shape[:2]
+        center_x = int(round(width * self.precision_camera_center_x))
+        cv2.line(image, (center_x, 0), (center_x, height - 1),
+                 (0, 0, 255), 2)
+        cv2.rectangle(image, (0, roi_top), (width - 1, roi_bottom - 1),
+                      (100, 100, 100), 1)
+        target_point = (
+            int(round(width * self.precision_target_x)),
+            int(round(height * self.precision_target_y)),
+        )
+        cv2.drawMarker(
+            image,
+            target_point,
+            (255, 0, 255),
+            cv2.MARKER_CROSS,
+            22,
+            2,
+        )
+        if observation.horizontal_line is not None:
+            line = tuple(
+                int(round(value)) for value in observation.horizontal_line
+            )
+            cv2.line(image, (line[0], line[1]), (line[2], line[3]),
+                     (0, 255, 255), 3)
+        if observation.guide_line is not None:
+            line = tuple(int(round(value)) for value in observation.guide_line)
+            cv2.line(image, (line[0], line[1]), (line[2], line[3]),
+                     (255, 100, 0), 4)
+        if observation.anchor_point is not None:
+            anchor = tuple(
+                int(round(value)) for value in observation.anchor_point
+            )
+            cv2.circle(image, anchor, 7, (0, 255, 0), -1)
+        status = 'CAMERA PRIORITY' if observation.valid else 'LiDAR fallback'
+        color = (0, 255, 0) if observation.valid else (0, 200, 255)
+        cv2.putText(
+            image,
+            status,
+            (12, 28),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.68,
+            color,
+            2,
+            cv2.LINE_AA,
+        )
+        if observation.valid:
+            cv2.putText(
+                image,
+                f'slot={self.parking_slot_number} '
+                f'h={observation.horizontal_angle_error_deg:+.1f}deg '
+                f'v={observation.guide_angle_error_deg:+.1f}deg '
+                f'x={observation.anchor_x_error:+.3f} '
+                f'y={observation.anchor_y_error:+.3f} '
+                f'steer={observation.steering_deg:+d}',
+                (12, 56),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.52,
+                (255, 255, 255),
+                1,
+                cv2.LINE_AA,
+            )
+        return observation, image
+
+    def active_parking_line_observation(
+        self,
+        now: Optional[float] = None,
+    ) -> Optional[ParkingLineObservation]:
+        """Return only a confirmed, fresh two-line camera measurement."""
+        observation = self.parking_line_observation
+        current_time = time.monotonic() if now is None else now
+        if (
+            not self.precision_camera_enabled
+            or not observation.valid
+            or current_time - observation.stamp > self.precision_camera_timeout
+        ):
+            return None
+        return observation
 
     def lidar_side_vehicle_distances(
         self, vehicles: list[VehicleCluster]
@@ -1348,6 +1931,8 @@ class ParkingNodeYym(Node):
                     self.reference_upper_gone = False
                     self.get_logger().info(
                         'Five-second stop complete: starting '
+                        'precision reverse; high-camera two-line guidance '
+                        'has priority, with LiDAR fallback. Initial fallback '
                         f'{self.final_correction_segment_count} x '
                         f'{self.final_correction_duration:.1f}s corrections '
                         'using line angle when misaligned or average parked-'
@@ -1376,8 +1961,18 @@ class ParkingNodeYym(Node):
                     )
                     return
 
+                camera_lines = self.active_parking_line_observation(now)
                 if self.reverse_phase == 'FINAL_STRAIGHT_DRIVE':
-                    self.publish_control(0, self.reverse_speed)
+                    # White lines may first enter the high-camera view after
+                    # the two initial correction segments. Use them as soon
+                    # as they do; stale/invalid camera data falls back to the
+                    # existing zero-steer continuous reverse.
+                    camera_steer = (
+                        camera_lines.steering_deg
+                        if camera_lines is not None
+                        else 0
+                    )
+                    self.publish_control(camera_steer, self.reverse_speed)
                     return
 
                 if self.reverse_phase == 'FINAL_ZERO_STEER_SETTLE':
@@ -1392,18 +1987,31 @@ class ParkingNodeYym(Node):
                         )
                     return
 
-                pair = self.observation.pair
-                if (
-                    pair is None
-                    and self.current_reference_lower is not None
-                    and self.current_reference_upper is not None
-                ):
-                    pair = self.build_parking_pair(
-                        self.current_reference_lower,
-                        self.current_reference_upper,
-                        require_valid_gap=False,
+                if camera_lines is not None:
+                    calculated_steer = camera_lines.steering_deg
+                    target_description = (
+                        f'HIGH CAMERA PRIORITY: slot '
+                        f'{self.parking_slot_number} template, '
+                        f'horizontal='
+                        f'{camera_lines.horizontal_angle_error_deg:+.1f}deg, '
+                        f'guide={camera_lines.guide_angle_error_deg:+.1f}deg, '
+                        f'anchor-x={camera_lines.anchor_x_error:+.3f}, '
+                        f'anchor-y={camera_lines.anchor_y_error:+.3f}, '
+                        f'confidence={camera_lines.confidence:.2f}'
                     )
-                if pair is not None:
+                else:
+                    pair = self.observation.pair
+                    if (
+                        pair is None
+                        and self.current_reference_lower is not None
+                        and self.current_reference_upper is not None
+                    ):
+                        pair = self.build_parking_pair(
+                            self.current_reference_lower,
+                            self.current_reference_upper,
+                            require_valid_gap=False,
+                        )
+                if camera_lines is None and pair is not None:
                     red_line_angle = self.reverse_reference_angle(pair)
                     lines_aligned = (
                         abs(red_line_angle)
@@ -1430,7 +2038,7 @@ class ParkingNodeYym(Node):
                         f'{math.degrees(pair.lower.axis_angle):+.0f}/'
                         f'{math.degrees(pair.upper.axis_angle):+.0f}deg'
                     )
-                else:
+                elif camera_lines is None:
                     self.reverse_phase = 'FINAL_MEASURE_STOP'
                     self.reverse_phase_started_at = now
                     self.publish_control(self.held_steering_command(), 0)
@@ -1574,9 +2182,16 @@ class ParkingNodeYym(Node):
             return
 
         if self.state == ParkingState.PARKED:
-            self.reverse_phase = 'PARKED_WAIT_EXIT'
+            self.reverse_phase = (
+                'PARKED_WAIT_EXIT'
+                if self.enable_exit_sequence
+                else 'PARKED_HOLD'
+            )
             self.publish_control(0, 0)
-            if elapsed >= self.exit_wait_after_park:
+            if (
+                self.enable_exit_sequence
+                and elapsed >= self.exit_wait_after_park
+            ):
                 self.mode = ParkingMode.EXIT
                 self.transition(ParkingState.EXIT_FORWARD, now)
                 self.reverse_phase = 'EXIT_FORWARD'
@@ -1924,14 +2539,19 @@ class ParkingNodeYym(Node):
                     f'{self.rear_half_empty_confirm_frames}'
                 )
         else:
+            camera_lines = self.active_parking_line_observation()
             displayed_steer = (
                 (
-                    0
-                    if self.reverse_phase in (
-                        'FINAL_ZERO_STEER_SETTLE',
-                        'FINAL_STRAIGHT_DRIVE',
+                    camera_lines.steering_deg
+                    if camera_lines is not None
+                    else (
+                        0
+                        if self.reverse_phase in (
+                            'FINAL_ZERO_STEER_SETTLE',
+                            'FINAL_STRAIGHT_DRIVE',
+                        )
+                        else self.final_conditional_steering(pair)
                     )
-                    else self.final_conditional_steering(pair)
                 )
                 if self.reverse_phase.startswith('FINAL_')
                 else self.reverse_steering(pair)
@@ -2004,12 +2624,22 @@ class ParkingNodeYym(Node):
                         'MANDATORY STOP | centering steer=0 before reverse'
                     )
                 elif self.reverse_phase == 'FINAL_STRAIGHT_DRIVE':
-                    guidance_text = (
-                        'FINAL steer=0 continuous reverse | '
-                        f'original gone L/R='
-                        f'{int(self.reference_upper_gone)}/'
-                        f'{int(self.reference_lower_gone)}'
-                    )
+                    camera_lines = self.active_parking_line_observation()
+                    if camera_lines is not None:
+                        guidance_text = (
+                            'PRECISION: CAMERA PRIORITY | '
+                            f'H={camera_lines.horizontal_angle_error_deg:+.1f} '
+                            f'V={camera_lines.guide_angle_error_deg:+.1f} '
+                            f'X={camera_lines.anchor_x_error:+.3f} '
+                            f'steer={camera_lines.steering_deg:+d}'
+                        )
+                    else:
+                        guidance_text = (
+                            'PRECISION: LiDAR/steer=0 fallback | '
+                            f'original gone L/R='
+                            f'{int(self.reference_upper_gone)}/'
+                            f'{int(self.reference_lower_gone)}'
+                        )
                 else:
                     guidance_text = (
                         f'{self.final_correction_duration:.1f}s tilt '
@@ -2038,6 +2668,11 @@ class ParkingNodeYym(Node):
             (0, 220, 220), 1, cv2.LINE_AA,
         )
         cv2.imshow(self.debug_window_name, image)
+        if self.precision_camera_debug_image is not None:
+            cv2.imshow(
+                f'{self.debug_window_name}_high_camera',
+                self.precision_camera_debug_image,
+            )
         cv2.waitKey(1)
 
     def destroy_node(self):
