@@ -22,7 +22,7 @@ MOTOR_CONTROL_TOPIC = '/motor_control'
 
 ######## 최대 조향각(angle임. +-45도) 및 속도(PWM. 0~255) ########
 # 순항 속도(PWM). 실차 트랙에서 반드시 재조정 필요.
-BASE_SPEED = 230
+BASE_SPEED = 255
 # steer 값 clamp 범위 (-MAX_STEER ~ +MAX_STEER)
 MAX_STEER = 45
 #############################################################

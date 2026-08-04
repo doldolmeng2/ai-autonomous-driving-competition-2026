@@ -32,7 +32,7 @@ constexpr uint8_t ROTATION_SENSOR_PIN = A1;
 constexpr uint8_t ROTATION_SAMPLE_COUNT = 8;
 
 constexpr int MAX_STEER_PWM = 150;
-constexpr int MAX_DRIVE_PWM = 230;
+constexpr int MAX_DRIVE_PWM = 255;
 constexpr unsigned long COMMAND_TIMEOUT_MS = 500;
 constexpr unsigned long SENSOR_PERIOD_MS = 180;
 constexpr unsigned long ECHO_TIMEOUT_US = 20000;
@@ -91,21 +91,6 @@ void setDrive(int value) {
 void stopAll() {
   setSteer(0);
   setDrive(0);
-}
-
-void homeSteering() {
-  setDrive(0);
-
-  // 현재 위치와 관계없이 왼쪽 끝까지 이동한다.
-  setSteer(-MAX_STEER_PWM);
-  delay(LEFT_END_TIME_MS);
-  setSteer(0);
-  delay(STEER_SETTLE_TIME_MS);
-
-  // 왼쪽 끝에서 중앙까지 복귀한다.
-  setSteer(MAX_STEER_PWM);
-  delay(LEFT_TO_CENTER_TIME_MS);
-  stopAll();
 }
 
 void processCommand() {
@@ -228,7 +213,6 @@ void setup() {
   }
 
   stopAll();
-  homeSteering();
   lastCommandAt = millis();
   lastSensorAt = millis();
 }

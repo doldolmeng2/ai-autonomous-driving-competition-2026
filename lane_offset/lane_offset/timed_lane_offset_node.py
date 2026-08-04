@@ -150,11 +150,14 @@ GREEN_MASK_WINDOW_NAME = 'ngg_green_mask'
 
 
 def class_mask(hsv, ycrcb, color_class):
-    """color_segment_bev_node와 같은 HSV/YCrCb 교집합 마스크."""
+    """흰색은 HSV만, 나머지 색은 설정된 HSV/YCrCb 교집합을 사용한다."""
     h_lo, h_hi = color_class['hsv']['h']
     s_lo, s_hi = color_class['hsv']['s']
     v_lo, v_hi = color_class['hsv']['v']
     mask = cv2.inRange(hsv, (h_lo, s_lo, v_lo), (h_hi, s_hi, v_hi))
+
+    if color_class['name'] == 'white':
+        return mask
 
     ycrcb_range = color_class['ycrcb']
     if ycrcb_range is not None:

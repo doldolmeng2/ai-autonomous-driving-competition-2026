@@ -11,13 +11,25 @@ REQUIRED_COLORS = {'white', 'green', 'light_gray', 'dark_gray'}
 
 
 def profile_file_path():
-    """Return installed config path, with a source-tree fallback for development."""
+    """Return source config when available, then fall back to installed config."""
+    module_path = Path(__file__).resolve()
+    source_path = module_path.parents[1] / 'config' / 'color_profiles.yaml'
+    source_candidates = [source_path]
+    source_candidates.extend(
+        parent.parent / 'lane_offset' / 'config' / 'color_profiles.yaml'
+        for parent in module_path.parents
+        if parent.name == 'install'
+    )
+    for candidate in source_candidates:
+        if candidate.is_file():
+            return candidate
+
     try:
         from ament_index_python.packages import get_package_share_directory
 
         return Path(get_package_share_directory('lane_offset')) / 'config' / 'color_profiles.yaml'
     except (ImportError, LookupError):
-        return Path(__file__).resolve().parents[1] / 'config' / 'color_profiles.yaml'
+        return source_path
 
 
 def read_profiles(path=None):
