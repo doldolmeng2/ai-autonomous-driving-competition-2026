@@ -26,6 +26,7 @@ setup(
             'lidar_node = sensor_topic.lidar_node:main',
             'ultrasonic_node = sensor_topic.ultrasonic_node:main',
             'controller_node = sensor_topic.controller_node:main',
+            'sensor_readiness_node = sensor_topic.sensor_readiness_node:main',
         ],
     },
 )

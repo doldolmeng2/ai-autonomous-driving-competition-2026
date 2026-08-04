@@ -31,9 +31,14 @@ STEER_ANGLE_TOLERANCE_DEG = 1.0
 STEER_RAW_LEFT = 530
 STEER_RAW_CENTER = 455
 STEER_RAW_RIGHT = 380
-STEER_PID_KP = 10.0
-STEER_PID_KI = 0.0
-STEER_PID_KD = 0.5
+# Time-trial lane driving PID.
+TIMED_STEER_PID_KP = 10.0
+TIMED_STEER_PID_KI = 0.0
+TIMED_STEER_PID_KD = 0.5
+# Mission lane driving PID. Tune these independently from the timed profile.
+MISSION_STEER_PID_KP = 20.0
+MISSION_STEER_PID_KI = 0.0
+MISSION_STEER_PID_KD = 0.5
 STEER_PID_INTEGRAL_LIMIT_PWM = 30.0
 STEER_PID_DERIVATIVE_FILTER_ALPHA = 0.25
 STEER_MIN_PWM = 40
@@ -43,6 +48,36 @@ STEER_MIN_PWM = 40
 PARKING_STEER_PID_KP = 4.0
 PARKING_STEER_PID_KI = 0.0
 PARKING_STEER_PID_KD = 0.0
+STEER_PID_PROFILE = 'timed'
+STEER_PID_PROFILES = {
+    'timed': (
+        TIMED_STEER_PID_KP,
+        TIMED_STEER_PID_KI,
+        TIMED_STEER_PID_KD,
+    ),
+    'mission': (
+        MISSION_STEER_PID_KP,
+        MISSION_STEER_PID_KI,
+        MISSION_STEER_PID_KD,
+    ),
+    'parking': (
+        PARKING_STEER_PID_KP,
+        PARKING_STEER_PID_KI,
+        PARKING_STEER_PID_KD,
+    ),
+}
+
+
+def steer_pid_gains(profile):
+    """Return the configured gains for a named driving profile."""
+    normalized = str(profile).strip().lower()
+    try:
+        return normalized, STEER_PID_PROFILES[normalized]
+    except KeyError as error:
+        raise ValueError(
+            f'Unknown steer_pid_profile {profile!r}; expected one of '
+            f'{sorted(STEER_PID_PROFILES)}'
+        ) from error
 
 
 class DriveControlNode(Node):
@@ -50,8 +85,6 @@ class DriveControlNode(Node):
 
     def __init__(self):
         super().__init__('drive_control_node')
-        # parking.launch.py remaps this node to ``parking_drive_control``.
-        self.parking_mode = self.get_name() == 'parking_drive_control'
         self.declare_parameter('motor_control_topic', MOTOR_CONTROL_TOPIC)
         self.declare_parameter('arduino_command_topic', ARDUINO_COMMAND_TOPIC)
         self.declare_parameter('steering_raw_topic', STEERING_RAW_TOPIC)
@@ -74,9 +107,13 @@ class DriveControlNode(Node):
         self.declare_parameter('steer_raw_left', STEER_RAW_LEFT)
         self.declare_parameter('steer_raw_center', STEER_RAW_CENTER)
         self.declare_parameter('steer_raw_right', STEER_RAW_RIGHT)
-        self.declare_parameter('steer_pid_kp', STEER_PID_KP)
-        self.declare_parameter('steer_pid_ki', STEER_PID_KI)
-        self.declare_parameter('steer_pid_kd', STEER_PID_KD)
+        self.declare_parameter('steer_pid_profile', STEER_PID_PROFILE)
+        self.steer_pid_profile, profile_gains = steer_pid_gains(
+            self.get_parameter('steer_pid_profile').value
+        )
+        self.declare_parameter('steer_pid_kp', profile_gains[0])
+        self.declare_parameter('steer_pid_ki', profile_gains[1])
+        self.declare_parameter('steer_pid_kd', profile_gains[2])
         self.declare_parameter(
             'steer_pid_integral_limit_pwm',
             STEER_PID_INTEGRAL_LIMIT_PWM,
@@ -173,13 +210,6 @@ class DriveControlNode(Node):
                 abs(int(self.get_parameter('steer_min_pwm').value)),
             ),
         )
-        if self.parking_mode:
-            # parking.launch.py gives this node the parking_drive_control
-            # name. Keep parking PID fixed here even if generic controller
-            # parameters are supplied by another launch/config file.
-            self.steer_pid_kp = PARKING_STEER_PID_KP
-            self.steer_pid_ki = PARKING_STEER_PID_KI
-            self.steer_pid_kd = PARKING_STEER_PID_KD
         if not (
             self.steer_raw_left
             > self.steer_raw_center
@@ -227,7 +257,7 @@ class DriveControlNode(Node):
             f'{self.steering_raw_topic} closed-loop feedback; '
             f'raw left/center/right='
             f'{self.steer_raw_left}/{self.steer_raw_center}/'
-            f'{self.steer_raw_right}; PID='
+            f'{self.steer_raw_right}; PID profile={self.steer_pid_profile} gains='
             f'{self.steer_pid_kp:.2f}/{self.steer_pid_ki:.2f}/'
             f'{self.steer_pid_kd:.2f}; '
             f'drive ramp accel/decel='

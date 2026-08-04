@@ -14,8 +14,15 @@ ULTRASONIC_TOPICS = [f'/ultrasonic/range_{index}' for index in range(1, 7)]
 LANE_OFFSET_TOPIC = '/lane_offset'
 LANE_INFO_TOPIC = '/lane_info'
 MOTOR_CONTROL_TOPIC = '/motor_control'
+
+######## 최대 조향각(angle임. +-45도) 및 속도(PWM. 0~255) ########
 BASE_SPEED = 120
 MAX_STEER = 45
+##############################################################
+
+
+
+##############  몇차선에서 출발할지 / 차선 변경 기준 ################
 # 미션 시작 차선의 단일 설정값. lane_offset 노드는 /lane_info를 받아 이 값을
 # 따라가므로 시작 차선을 바꿀 때는 이 상수만 수정한다.
 DRIVING_MODE = '2lane'
@@ -27,6 +34,11 @@ LANE_CHANGE_CLEAR_CONFIRM_SAMPLES = 3
 LANE_CHANGE_COOLDOWN_SEC = 7.0
 # 한 번의 노드 실행에서 각 방향(1->2, 2->1)으로 허용할 최대 변경 횟수.
 LANE_CHANGE_MAX_PER_DIRECTION = 1
+##############################################################
+
+
+
+##################### 신호등 관련 파라미터 ######################
 DEBUG_VIEW = True
 DEBUG_WINDOW_NAME = 'mission_lane_main_debug'
 TRAFFIC_LIGHT_DEBUG_WINDOW_NAME = 'mission_lane_traffic_light_mask'
@@ -57,6 +69,8 @@ GREEN_SATURATION_MIN = 60
 GREEN_VALUE_MIN = 80
 GREEN_HLS_SATURATION_MIN = 60
 GREEN_YCRCB_CR_MAX = 135
+###############################################################
+
 
 
 class MissionLaneMainNode(Node):

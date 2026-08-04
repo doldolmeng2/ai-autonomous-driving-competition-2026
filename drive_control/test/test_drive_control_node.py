@@ -1,4 +1,18 @@
-from drive_control.drive_control_node import DriveControlNode
+import pytest
+
+from drive_control.drive_control_node import (
+    DriveControlNode,
+    MISSION_STEER_PID_KD,
+    MISSION_STEER_PID_KI,
+    MISSION_STEER_PID_KP,
+    PARKING_STEER_PID_KD,
+    PARKING_STEER_PID_KI,
+    PARKING_STEER_PID_KP,
+    TIMED_STEER_PID_KD,
+    TIMED_STEER_PID_KI,
+    TIMED_STEER_PID_KP,
+    steer_pid_gains,
+)
 
 
 class FakePublisher:
@@ -7,6 +21,40 @@ class FakePublisher:
 
     def publish(self, message):
         self.data = list(message.data)
+
+
+@pytest.mark.parametrize(
+    ('profile', 'expected'),
+    [
+        (
+            'timed',
+            (TIMED_STEER_PID_KP, TIMED_STEER_PID_KI, TIMED_STEER_PID_KD),
+        ),
+        (
+            'mission',
+            (
+                MISSION_STEER_PID_KP,
+                MISSION_STEER_PID_KI,
+                MISSION_STEER_PID_KD,
+            ),
+        ),
+        (
+            'parking',
+            (
+                PARKING_STEER_PID_KP,
+                PARKING_STEER_PID_KI,
+                PARKING_STEER_PID_KD,
+            ),
+        ),
+    ],
+)
+def test_named_steering_pid_profiles(profile, expected):
+    assert steer_pid_gains(profile) == (profile, expected)
+
+
+def test_unknown_steering_pid_profile_is_rejected():
+    with pytest.raises(ValueError, match='Unknown steer_pid_profile'):
+        steer_pid_gains('unknown')
 
 
 def test_pwm_command_is_published_without_serial_access():

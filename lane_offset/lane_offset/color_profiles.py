@@ -1,4 +1,4 @@
-"""Persistent, validated color-profile loading for lane detection nodes."""
+"""Persistent, validated venue color palettes for lane detection nodes."""
 
 from copy import deepcopy
 from pathlib import Path
@@ -7,10 +7,7 @@ import yaml
 
 
 ACTIVE_PROFILE_PATH = Path.home() / '.config' / 'lane_offset' / 'active_color_profile'
-REQUIRED_COLORS = {
-    'mission': {'white', 'green', 'light_gray'},
-    'timed': {'white', 'green', 'light_gray', 'dark_gray'},
-}
+REQUIRED_COLORS = {'white', 'green', 'light_gray', 'dark_gray'}
 
 
 def profile_file_path():
@@ -51,31 +48,32 @@ def select_profile(name, path=None):
     data, _ = read_profiles(path)
     if name not in data['profiles']:
         raise ValueError(f'Unknown color profile: {name}')
-    for section in ('mission', 'timed'):
-        colors = _validated_colors(data['profiles'][name].get(section), section)
-        if set(colors) != REQUIRED_COLORS[section]:
-            raise ValueError(
-                f'Profile {name!r}/{section} colors must be '
-                f'{sorted(REQUIRED_COLORS[section])}, got {sorted(colors)}'
-            )
+    colors = _validated_colors(data['profiles'][name].get('colors'), name)
+    missing = REQUIRED_COLORS - set(colors)
+    if missing:
+        raise ValueError(
+            f'Profile {name!r} is missing required palette colors: '
+            f'{sorted(missing)}'
+        )
     ACTIVE_PROFILE_PATH.parent.mkdir(parents=True, exist_ok=True)
     ACTIVE_PROFILE_PATH.write_text(name + '\n', encoding='utf-8')
 
 
-def load_color_classes(default_classes, section, path=None):
-    """Overlay the selected profile's thresholds on class metadata from a node."""
+def load_color_classes(class_metadata, path=None):
+    """Attach the active venue's thresholds to node-owned class metadata."""
     data, source = read_profiles(path)
     name = selected_profile_name(data)
-    overrides = _validated_colors(data['profiles'][name].get(section), section)
-    result = deepcopy(default_classes)
+    palette = _validated_colors(data['profiles'][name].get('colors'), name)
+    result = deepcopy(class_metadata)
     expected = {item['name'] for item in result}
-    if set(overrides) != expected:
+    missing = expected - set(palette)
+    if missing:
         raise ValueError(
-            f'Profile {name!r}/{section} colors must be {sorted(expected)}, '
-            f'got {sorted(overrides)}'
+            f'Profile {name!r} is missing colors required by this node: '
+            f'{sorted(missing)}'
         )
     for color_class in result:
-        values = overrides[color_class['name']]
+        values = palette[color_class['name']]
         color_class['hsv'] = values['hsv']
         color_class['ycrcb'] = values.get('ycrcb')
     return result, name, source

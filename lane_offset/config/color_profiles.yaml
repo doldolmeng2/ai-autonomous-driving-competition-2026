@@ -2,30 +2,35 @@ default_profile: lions_hall
 
 profiles:
   lions_hall:
-    description: 기존 트랙에서 사용하던 색상 임계값
-    mission:
+    description: 라이온스홀 색상 임계값
+    colors:
       white:
         hsv: {h: [0, 179], s: [0, 44], v: [161, 255]}
         ycrcb: {y: [135, 255], cr: [81, 165], cb: [122, 170]}
       green:
         hsv: {h: [31, 60], s: [48, 200], v: [0, 255]}
-      light_gray:
-        hsv: {h: [77, 104], s: [6, 30], v: [140, 180]}
-    timed:
-      white:
-        hsv: {h: [0, 179], s: [0, 44], v: [161, 255]}
-        ycrcb: {y: [135, 255], cr: [81, 165], cb: [122, 170]}
       light_gray:
         hsv: {h: [56, 179], s: [0, 64], v: [119, 165]}
         ycrcb: {y: [0, 163], cr: [0, 255], cb: [0, 255]}
       dark_gray:
         hsv: {h: [0, 179], s: [0, 102], v: [0, 144]}
         ycrcb: {y: [0, 144], cr: [0, 255], cb: [0, 142]}
+
+  yung_gyo_1st_floor:
+    description: 융교 1층 색상 임계값
+    colors:
+      white:
+        hsv: {h: [0, 179], s: [0, 44], v: [161, 255]}
+        ycrcb: {y: [175, 255], cr: [81, 165], cb: [122, 170]}
       green:
         hsv: {h: [31, 60], s: [48, 200], v: [0, 255]}
+      light_gray:
+        hsv: {h: [77, 104], s: [6, 30], v: [140, 180]}
+      dark_gray:
+        hsv: {h: [0, 179], s: [0, 102], v: [0, 144]}
+        ycrcb: {y: [0, 144], cr: [0, 255], cb: [0, 142]}
 
-  # 새 장소는 lions_hall을 복사한 뒤 이름과 임계값을 수정해 추가하세요.
+  # 새 장소는 기존 프로필을 복사한 뒤 이름과 임계값을 수정해 추가하세요.
   # new_place:
   #   description: 새 장소 설명
-  #   mission: ...
-  #   timed: ...
+  #   colors: ...

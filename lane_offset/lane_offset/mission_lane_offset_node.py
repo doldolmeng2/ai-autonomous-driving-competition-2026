@@ -36,46 +36,14 @@ import cv2
 
 from .color_profiles import load_color_classes
 
-# ============================================================================
-# 파라미터 기본값 - 튜닝은 대부분 여기서만 하면 된다.
-# (전부 ROS 파라미터로도 선언되므로 --ros-args -p 로 실행 중 덮어쓰기도 가능)
-# ============================================================================
-
-# 구독/발행 토픽
+######################## 구독/발행 토픽 ########################
 IMAGE_TOPIC = '/camera/high/image_raw'
 LANE_OFFSET_TOPIC = '/lane_offset'
 LANE_INFO_TOPIC = '/lane_info'
+################################################################
 
-# 중앙 흰색 점선 분류 설정.
-BACKGROUND_COLOR_BGR = (0, 0, 0)
-COLOR_CLASSES = [
-    {
-        'name': 'white',
-        'color_bgr': (255, 255, 255),
-        'hsv': {'h': (0, 179), 's': (0, 44), 'v': (161, 255)},
-        'ycrcb': {'y': (175, 255), 'cr': (81, 165), 'cb': (122, 170)},
-    },
-]
 
-# 도로 "바깥" 색. 오른쪽 바깥 실선 밖은 초록 매트(timed_lane_offset_node와 동일
-# 임계값), 왼쪽 바깥 실선 밖은 밝은 회색 영역이다. side는 흰 덩어리를 기준으로
-# 그 색이 어느 쪽에 있어야 하는지를 뜻한다.
-OUTER_COLOR_CLASSES = [
-    {
-        'name': 'green',
-        'side': 'right',
-        'color_bgr': (0, 255, 0),
-        'hsv': {'h': (31, 60), 's': (48, 200), 'v': (0, 255)},
-        'ycrcb': None,
-    },
-    {
-        'name': 'light_gray',
-        'side': 'left',
-        'color_bgr': (211, 211, 211),
-        'hsv': {'h': (77, 104), 's': (6, 30), 'v': (140, 180)},
-        'ycrcb': None,
-    },
-]
+####################### 바깥 차선 필터/기억 #######################
 # 흰 덩어리를 이 픽셀만큼 부풀린 이웃에서 바깥 색을 찾는다(BEV 좌표 기준).
 OUTER_NEAR_DISTANCE_PX = 20
 # 이웃 안 바깥 색 픽셀이 이 수 이상이어야 "바깥 실선"으로 인정한다.
@@ -102,7 +70,10 @@ OUTER_MEMORY_MAX_DRIFT_PX = 15
 OUTER_MEMORY_MAX_AGE_FRAMES = 90
 # 기억 근처에서 아무 덩어리도 이어지지 않은 프레임이 이만큼 쌓이면 기억을 버린다.
 OUTER_MEMORY_MAX_MISSES = 10
+################################################################
 
+
+######################## BEV/ROI 전처리 ########################
 # 원본 영상 높이의 20% 지점부터 최하단까지 BEV로 펼친다.
 BEV_Y_TOP_RATIO = 0.2
 BEV_Y_BOTTOM_RATIO = 1.0
@@ -127,7 +98,10 @@ ROI_TRAPEZOID_BOTTOM_INSET_PX = 0
 NEAR_FIELD_ROWS = 100
 # 근접 밴드에서 흰색 비율이 이 값을 넘으면 횡단보도 등으로 판단하고 무시
 WHITE_OVERLOAD_RATIO = 0.15
+################################################################
 
+
+######################## 차선/조향 기준 ########################
 # 시작 차선은 이 노드에서 정하지 않는다. mission_lane_main_node가 발행하는
 # /lane_info를 단일 기준으로 사용한다.
 # 640px BEV에서 차가 정상 위치일 때 보이는 중앙 점선의 x좌표.
@@ -137,9 +111,6 @@ DASHED_REFERENCE_X_PX_1LANE = 510
 # 기준선과 이만큼 차이 나면 lane_offset의 최대/최소값(+/-45)에 도달한다.
 OFFSET_ERROR_LIMIT_PX = 195
 LANE_OFFSET_LIMIT = 45
-# 기준선 오차에 비례해 조향하도록 1.0을 사용한다. 10.0은 약 20px 오차만
-# 생겨도 바로 +/-45로 포화되어 "떨어진 만큼" 조향하지 못한다.
-OFFSET_KP = 2.0
 # 한 프레임 사이 offset이 이 값보다 더 튀면 오검출로 보고 이전 값 유지
 MAX_OFFSET_JUMP_PX = 80
 # 중앙 점선 미검출 시 현재 차선 안쪽으로 꺾는 offset 누적량.
@@ -148,7 +119,10 @@ NO_DASH_RECOVERY_STEP = 3
 # 차로 전환 시 조향 기준을 한 프레임에 이동시킬 최대 픽셀 수. 검출 시작점은
 # 이 값과 무관하게 기존에 추적하던 물리적 중앙선 위치를 계속 사용한다.
 LANE_REFERENCE_TRANSITION_STEP_PX = 5.0
+################################################################
 
+
+######################## 점선 추적/연결 ########################
 # 슬라이딩 윈도우. BEV 세로 방향 박스를 약 20px로 얇게 나눈다.
 NUM_WINDOWS = 15
 # 점선은 빈 구간을 넘어 다음 조각을 잡아야 하므로 실선보다 넓게 탐색한다.
@@ -180,6 +154,10 @@ WINDOW_START_ADAPT_RATE = 0.7
 # 새 검출 위치가 이전 박스 시작점에서 이 거리보다 크게 튀면 오검출로 보고
 # 시작점을 갱신하지 않는다.
 MAX_WINDOW_START_JUMP_PX = 180
+################################################################
+
+
+######################## 디버그 시각화 ########################
 # 디버그 시각화: ROI/차선/슬라이딩 윈도우를 그린 화면을 바로 OpenCV 창으로 띄운다.
 # (bag/카메라 토픽만 켜져 있으면, 이 노드 실행만으로 인식 화면이 뜬다.)
 # 실차 대회 주행 시에는 CPU 절약을 위해 False로 끄는 것을 권장.
@@ -188,6 +166,7 @@ WINDOW_NAME = 'mission_lane_offset_debug'
 WHITE_MASK_WINDOW_NAME = 'mission_lane_offset_white_mask'
 CONNECTED_DASH_WINDOW_NAME = 'mission_lane_offset_connected_dash'
 DEBUG_IMAGE_TOPIC = '/lane_offset/debug_image'
+################################################################
 
 
 def class_mask(hsv, ycrcb, color_class):
@@ -215,26 +194,28 @@ class MissionLaneOffsetNode(Node):
     def __init__(self):
         super().__init__('mission_lane_offset_node')
 
-        try:
-            color_classes, self.color_profile_name, profile_path = load_color_classes(
-                list(COLOR_CLASSES) + list(OUTER_COLOR_CLASSES), 'mission'
-            )
-            self.color_classes = [
-                item for item in color_classes if item['name'] == 'white'
-            ]
-            self.outer_color_classes = [
-                item for item in color_classes if item['name'] != 'white'
-            ]
-            self.get_logger().info(
-                f'Color profile={self.color_profile_name} ({profile_path})'
-            )
-        except (OSError, ValueError) as error:
-            self.color_profile_name = 'built-in fallback'
-            self.color_classes = COLOR_CLASSES
-            self.outer_color_classes = OUTER_COLOR_CLASSES
-            self.get_logger().error(
-                f'Color profile load failed; using built-in values: {error}'
-            )
+        color_classes, self.color_profile_name, profile_path = load_color_classes([
+            {'name': 'white', 'color_bgr': (255, 255, 255)},
+            {
+                'name': 'green',
+                'side': 'right',
+                'color_bgr': (0, 255, 0),
+            },
+            {
+                'name': 'light_gray',
+                'side': 'left',
+                'color_bgr': (211, 211, 211),
+            },
+        ])
+        self.color_classes = [
+            item for item in color_classes if item['name'] == 'white'
+        ]
+        self.outer_color_classes = [
+            item for item in color_classes if item['name'] != 'white'
+        ]
+        self.get_logger().info(
+            f'Color profile={self.color_profile_name} ({profile_path})'
+        )
 
         # ---- 파라미터 ------------------------------------------------------
         self.declare_parameter('bev_y_top_ratio', BEV_Y_TOP_RATIO)
@@ -280,7 +261,6 @@ class MissionLaneOffsetNode(Node):
         self.declare_parameter('dashed_reference_x_px_1lane', DASHED_REFERENCE_X_PX_1LANE)
         self.declare_parameter('offset_error_limit_px', OFFSET_ERROR_LIMIT_PX)
         self.declare_parameter('lane_offset_limit', LANE_OFFSET_LIMIT)
-        self.declare_parameter('offset_kp', OFFSET_KP)
         self.declare_parameter('max_offset_jump_px', MAX_OFFSET_JUMP_PX)
         self.declare_parameter(
             'lane_reference_transition_step_px',
@@ -427,7 +407,6 @@ class MissionLaneOffsetNode(Node):
         self.lane_offset_limit = max(
             1, int(self.get_parameter('lane_offset_limit').value)
         )
-        self.offset_kp = max(0.0, float(self.get_parameter('offset_kp').value))
         self.max_offset_jump_px = int(
             self.get_parameter('max_offset_jump_px').value
         )
@@ -555,7 +534,6 @@ class MissionLaneOffsetNode(Node):
         self.get_logger().info(
             f'Subscribing {self.image_topic}, publishing {self.lane_offset_topic}, '
             f'waiting for {LANE_INFO_TOPIC} to select the starting lane, '
-            f'offset_kp={self.offset_kp:.2f}, '
             f'debug_view={self.debug_view}, '
             f'offset range=+/-{self.lane_offset_limit}'
         )
@@ -772,14 +750,14 @@ class MissionLaneOffsetNode(Node):
         return self.last_offset
 
     def map_lane_x_to_offset(self, detected_lane_x):
-        """점선 오차에 Kp를 적용해 -45~45 offset으로 매핑한다."""
+        """점선 오차를 -45~45 offset으로 매핑한다."""
         error_px = float(detected_lane_x) - self.dashed_reference_x_px
         normalized = np.clip(
             error_px / self.offset_error_limit_px,
             -1.0,
             1.0,
         )
-        scaled_offset = normalized * self.lane_offset_limit * self.offset_kp
+        scaled_offset = normalized * self.lane_offset_limit
         return int(round(np.clip(
             scaled_offset, -self.lane_offset_limit, self.lane_offset_limit
         )))
@@ -795,9 +773,7 @@ class MissionLaneOffsetNode(Node):
         """
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         ycrcb = cv2.cvtColor(frame, cv2.COLOR_BGR2YCrCb)
-        segmented = np.full_like(
-            frame, BACKGROUND_COLOR_BGR, dtype=np.uint8
-        )
+        segmented = np.zeros_like(frame, dtype=np.uint8)
         for color_class in self.outer_color_classes + self.color_classes:
             mask = class_mask(hsv, ycrcb, color_class)
             segmented[mask > 0] = color_class['color_bgr']

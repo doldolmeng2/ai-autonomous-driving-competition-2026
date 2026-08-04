@@ -44,45 +44,14 @@ import cv2
 
 from .color_profiles import load_color_classes
 
-# ============================================================================
-# 파라미터 기본값 - 튜닝은 대부분 여기서만 하면 된다.
-# (전부 ROS 파라미터로도 선언되므로 --ros-args -p 로 실행 중 덮어쓰기도 가능)
-# ============================================================================
-
+######################## 구독/발행 토픽 ########################
 IMAGE_TOPIC = '/camera/high/image_raw'
 LANE_OFFSET_TOPIC = '/lane_offset'
 DEBUG_IMAGE_TOPIC = '/lane_offset/debug_image_ngg'
+################################################################
 
-# 색상 분류. color_segment_bev_node와 동일하게 HSV와 YCrCb를 함께 사용한다.
-# 뒤쪽 클래스가 먼저 적용된 클래스를 덮어쓴다.
-BACKGROUND_COLOR_BGR = (0, 0, 0)
-COLOR_CLASSES = [
-    {
-        'name': 'white',
-        'color_bgr': (255, 255, 255),
-        'hsv': {'h': (0, 179), 's': (0, 44), 'v': (161, 255)},
-        'ycrcb': {'y': (135, 255), 'cr': (81, 165), 'cb': (122, 170)},
-    },
-    {
-        'name': 'light_gray',
-        'color_bgr': (211, 211, 211),
-        'hsv': {'h': (56, 179), 's': (0, 64), 'v': (119, 165)},
-        'ycrcb': {'y': (0, 163), 'cr': (0, 255), 'cb': (0, 255)},
-    },
-    {
-        'name': 'dark_gray',
-        'color_bgr': (105, 105, 105),
-        'hsv': {'h': (0, 179), 's': (0, 102), 'v': (0, 144)},
-        'ycrcb': {'y': (0, 144), 'cr': (0, 255), 'cb': (0, 142)},
-    },
-    {
-        'name': 'green',
-        'color_bgr': (0, 255, 0),
-        'hsv': {'h': (31, 60), 's': (48, 200), 'v': (0, 255)},
-        'ycrcb': None,
-    },
-]
 
+######################## BEV/가로선 전처리 ########################
 # BEV(Bird's Eye View): 원본의 아래쪽 직사각형을 출력 사다리꼴로 워프한다.
 BEV_Y_TOP_RATIO = 0.4
 BEV_Y_BOTTOM_RATIO = 1.0
@@ -97,10 +66,10 @@ BEV_OUTPUT_HEIGHT = 0
 HORIZONTAL_RUN_MIN_PX = 50
 # 검출된 가로선 행을 기준으로 위/아래 이 픽셀 수만큼 흰색 마스크를 지운다.
 HORIZONTAL_ERASE_HALF_BAND_PX = 5
+################################################################
 
-# ---------------------------------------------------------------------------
-# 오른쪽 실선 판정: 흰색 덩어리 주변 초록 매트 검증
-# ---------------------------------------------------------------------------
+
+####################### 오른쪽 실선 색상 검증 #######################
 # 덩어리를 이 픽셀 수만큼 부풀린 이웃 영역에서 초록을 찾는다. 커브에서 실선과
 # 매트가 같은 x strip에 안 겹쳐도 잡히도록 고정 strip 대신 팽창을 쓴다.
 GREEN_NEAR_DISTANCE_PX = 20
@@ -109,10 +78,10 @@ GREEN_MIN_PIXELS = 10
 # 초록이 덩어리보다 오른쪽에 있어야 한다(중앙 점선/왼쪽 실선 배제).
 # 이웃 초록의 평균 x가 덩어리 평균 x보다 이 값 이상 커야 한다.
 GREEN_RIGHT_MARGIN_PX = -1000
+################################################################
 
-# ---------------------------------------------------------------------------
-# 흰색 덩어리 모양 필터(초록 매트 위 흰 꽃 그림 등 제외)
-# ---------------------------------------------------------------------------
+
+######################## 흰색 덩어리 필터 ########################
 MIN_COMPONENT_AREA = 50      # 너무 작은 덩어리 제외
 MIN_LINE_HEIGHT_PX = 25       # 세로로 어느 정도 길어야 실선
 MIN_LINE_ASPECT_RATIO = 0.0   # 세로/가로 비. 동글동글한 꽃 그림 배제
@@ -121,10 +90,10 @@ MIN_LINE_ASPECT_RATIO = 0.0   # 세로/가로 비. 동글동글한 꽃 그림 �
 SMALL_COMPACT_MAX_AREA = 1800
 SMALL_COMPACT_MAX_SIDE_PX = 90
 SMALL_COMPACT_MIN_ELONGATION = 2.0
+################################################################
 
-# ---------------------------------------------------------------------------
-# 조향 기준
-# ---------------------------------------------------------------------------
+
+######################## 차선/조향 기준 ########################
 # 차가 정상 위치일 때 오른쪽 실선이 있어야 할 BEV 화면 x.
 # 기존 카메라 좌표 보정값을 유지한 값이므로, BEV 적용 후에는 디버그 화면의
 # right_x를 보고 다시 조정해야 한다.
@@ -164,18 +133,20 @@ ALLOW_LINE_BOTTOM_FALLBACK = True
 # 기준선과 이만큼 차이 나면 lane_offset 최대/최소(+/-45)에 도달한다.
 OFFSET_ERROR_LIMIT_PX = 130
 LANE_OFFSET_LIMIT = 45
-OFFSET_KP = 1.0
 # 한 프레임 사이 offset이 이보다 크게 튀면 오검출로 보고 직전 값을 유지한다.
 MAX_OFFSET_JUMP = 2000
 # 발행 offset 저역통과(EMA) 계수. 1.0이면 필터 없음.
 OFFSET_SMOOTHING_ALPHA = 1.0
+################################################################
 
-# 디버그 시각화
+
+######################## 디버그 시각화 ########################
 # launch 파일에서 덮어쓰지 않고 이 노드의 상수로 디버그 창 여부를 결정한다.
 DEBUG_VIEW = True
 WINDOW_NAME = 'timed_lane_offset_ngg'
 WHITE_MASK_WINDOW_NAME = 'ngg_white_mask'
 GREEN_MASK_WINDOW_NAME = 'ngg_green_mask'
+################################################################
 
 
 def class_mask(hsv, ycrcb, color_class):
@@ -203,19 +174,17 @@ class TimedLaneOffsetNggNode(Node):
     def __init__(self):
         super().__init__('timed_lane_offset_node_ngg')
 
-        try:
-            self.color_classes, self.color_profile_name, profile_path = (
-                load_color_classes(COLOR_CLASSES, 'timed')
-            )
-            self.get_logger().info(
-                f'Color profile={self.color_profile_name} ({profile_path})'
-            )
-        except (OSError, ValueError) as error:
-            self.color_profile_name = 'built-in fallback'
-            self.color_classes = COLOR_CLASSES
-            self.get_logger().error(
-                f'Color profile load failed; using built-in values: {error}'
-            )
+        self.color_classes, self.color_profile_name, profile_path = (
+            load_color_classes([
+                {'name': 'white', 'color_bgr': (255, 255, 255)},
+                {'name': 'light_gray', 'color_bgr': (211, 211, 211)},
+                {'name': 'dark_gray', 'color_bgr': (105, 105, 105)},
+                {'name': 'green', 'color_bgr': (0, 255, 0)},
+            ])
+        )
+        self.get_logger().info(
+            f'Color profile={self.color_profile_name} ({profile_path})'
+        )
 
         self.declare_parameter('bev_y_top_ratio', BEV_Y_TOP_RATIO)
         self.declare_parameter('bev_y_bottom_ratio', BEV_Y_BOTTOM_RATIO)
@@ -277,7 +246,6 @@ class TimedLaneOffsetNggNode(Node):
         )
         self.declare_parameter('offset_error_limit_px', OFFSET_ERROR_LIMIT_PX)
         self.declare_parameter('lane_offset_limit', LANE_OFFSET_LIMIT)
-        self.declare_parameter('offset_kp', OFFSET_KP)
         self.declare_parameter('max_offset_jump', MAX_OFFSET_JUMP)
         self.declare_parameter('offset_smoothing_alpha', OFFSET_SMOOTHING_ALPHA)
         self.declare_parameter('debug_view', DEBUG_VIEW)
@@ -386,7 +354,6 @@ class TimedLaneOffsetNggNode(Node):
         self.allow_line_bottom_fallback = bool(get('allow_line_bottom_fallback'))
         self.offset_error_limit_px = max(1, int(get('offset_error_limit_px')))
         self.lane_offset_limit = max(1, int(get('lane_offset_limit')))
-        self.offset_kp = max(0.0, float(get('offset_kp')))
         self.max_offset_jump = int(get('max_offset_jump'))
         self.offset_smoothing_alpha = float(
             np.clip(get('offset_smoothing_alpha'), 0.0, 1.0)
@@ -570,7 +537,7 @@ class TimedLaneOffsetNggNode(Node):
         """입력을 5색 분류 이미지로 바꾼다. BEV는 이 결과에 적용한다."""
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         ycrcb = cv2.cvtColor(frame, cv2.COLOR_BGR2YCrCb)
-        segmented = np.full_like(frame, BACKGROUND_COLOR_BGR, dtype=np.uint8)
+        segmented = np.zeros_like(frame, dtype=np.uint8)
         for color_class in self.color_classes:
             mask = class_mask(hsv, ycrcb, color_class)
             segmented[mask > 0] = color_class['color_bgr']
@@ -938,7 +905,7 @@ class TimedLaneOffsetNggNode(Node):
         """
         error_px = float(measured_x) - float(target_x)
         normalized = np.clip(error_px / self.offset_error_limit_px, -1.0, 1.0)
-        scaled = normalized * self.lane_offset_limit * self.offset_kp
+        scaled = normalized * self.lane_offset_limit
         return int(round(np.clip(
             scaled, -self.lane_offset_limit, self.lane_offset_limit
         )))

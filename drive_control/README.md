@@ -4,6 +4,15 @@
 PWM commands on `/arduino/motor_command`. It never opens a serial device;
 `sensor_topic/arduino_communication_node` exclusively owns communication.
 
+## Steering PID profiles
+
+`steer_pid_profile` selects independent `timed`, `mission`, or `parking`
+steering gains. Their defaults are defined in `drive_control_node.py` as
+`TIMED_STEER_PID_*`, `MISSION_STEER_PID_*`, and `PARKING_STEER_PID_*`. The timed,
+mission, and parking launch files select the matching profile explicitly.
+`steer_pid_kp`, `steer_pid_ki`, and `steer_pid_kd` can still override the
+selected profile for a single launch.
+
 Flash `arduino_code/integrated_ardunio_code/integrated_ardunio_code.ino`
 to the Arduino Mega 2560.
 
