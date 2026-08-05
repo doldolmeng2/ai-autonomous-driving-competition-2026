@@ -4,3 +4,4 @@ alias parking='bash "$HOME/osy/260801/ai-autonomous-driving-competition-2026/com
 alias manual_bag='bash "$HOME/osy/260801/ai-autonomous-driving-competition-2026/competition_workflow.sh" manual_bag'
 alias tuner_ycrcb='bash "$HOME/osy/260801/ai-autonomous-driving-competition-2026/competition_workflow.sh" tuner_ycrcb'
 alias tuner_hsv='bash "$HOME/osy/260801/ai-autonomous-driving-competition-2026/competition_workflow.sh" tuner_hsv'
+alias tuner_hsv_ycrcb='bash "$HOME/osy/260801/ai-autonomous-driving-competition-2026/competition_workflow.sh" tuner_hsv_ycrcb'

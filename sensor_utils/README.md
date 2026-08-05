@@ -10,12 +10,22 @@
 | `camera_pose_check_node` | `/camera/high/image_raw`, `/camera/low/image_raw` | OpenCV window |
 | `hsv_tuner_node` | camera image topic | OpenCV HSV tuner |
 | `ycrcb_tuner_node` | camera image topic | OpenCV YCrCb tuner |
+| `hsv_ycrcb_tuner_node` | camera image topic | OpenCV HSV/YCrCb AND-mask tuner |
 | `lidar_viewer_node` | `/scan` | OpenCV radar window |
 | `ultrasonic_viewer_node` | `/ultrasonic/range_1` ... `/ultrasonic/range_6` | OpenCV range window |
 | `controller_viewer_node` | `/manual_controller/joy` | OpenCV controller window |
 | `joy_to_motor_node` | `/manual_controller/joy` | `/motor_control` |
 
 `lidar_viewer_node` uses rear 0°, right +90°, front ±180°, and left -90°.
+
+HSV와 YCrCb 임계값을 한번에 조절하며 각 마스크와 AND 마스크를
+확인하려면 다음과 같이 실행한다. `preset`은 `white`, `green`,
+`light_gray`, `dark_gray`, `full` 중 하나다.
+
+```bash
+ros2 run sensor_utils hsv_ycrcb_tuner_node --ros-args \
+  -p image_topic:=/camera/high/image_raw -p preset:=white
+```
 
 Useful launches:
 

@@ -30,6 +30,7 @@ setup(
             'camera_pose_check_node = sensor_utils.camera_pose_check_node:main',
             'hsv_tuner_node = sensor_utils.hsv_tuner_node:main',
             'ycrcb_tuner_node = sensor_utils.ycrcb_tuner_node:main',
+            'hsv_ycrcb_tuner_node = sensor_utils.hsv_ycrcb_tuner_node:main',
         ],
     },
 )

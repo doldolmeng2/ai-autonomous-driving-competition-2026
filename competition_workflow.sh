@@ -72,8 +72,12 @@ case "${1:-}" in
         start_sensors_and_wait "['/camera/high/image_raw']"
         ros2 run sensor_utils hsv_tuner_node
         ;;
+    tuner_hsv_ycrcb)
+        start_sensors_and_wait "['/camera/high/image_raw']"
+        ros2 run sensor_utils hsv_ycrcb_tuner_node
+        ;;
     *)
-        echo "Usage: $0 {lane_time|lane_mission|parking|manual_bag|tuner_ycrcb|tuner_hsv}" >&2
+        echo "Usage: $0 {lane_time|lane_mission|parking|manual_bag|tuner_ycrcb|tuner_hsv|tuner_hsv_ycrcb}" >&2
         exit 2
         ;;
 esac
