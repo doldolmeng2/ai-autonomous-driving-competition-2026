@@ -31,6 +31,7 @@ setup(
             'hsv_tuner_node = sensor_utils.hsv_tuner_node:main',
             'ycrcb_tuner_node = sensor_utils.ycrcb_tuner_node:main',
             'hsv_ycrcb_tuner_node = sensor_utils.hsv_ycrcb_tuner_node:main',
+            'hsv_ycrcb_lab_tuner_node = sensor_utils.hsv_ycrcb_lab_tuner_node:main',
         ],
     },
 )

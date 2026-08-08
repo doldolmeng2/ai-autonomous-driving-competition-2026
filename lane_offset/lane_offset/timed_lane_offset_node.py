@@ -100,7 +100,7 @@ SMALL_COMPACT_MIN_ELONGATION = 2.0
 TARGET_RIGHT_X = 540
 # 초록 매트 검증을 통과한 오른쪽 실선이 이 프레임 수만큼 연속으로 보일 때만
 # 중앙선 fallback에서 오른쪽 실선 제어로 복귀한다.
-RIGHT_GREEN_STABLE_FRAMES = 10
+RIGHT_GREEN_STABLE_FRAMES = 10 
 # 오른쪽 실선이 안 보일 때 중앙 점선이 있어야 할 BEV 화면 x. 기본값은
 # TARGET_RIGHT_X - 차선 폭(약 190px)이며, 실제 BEV 디버그 화면에서 조정한다.
 TARGET_CENTER_X = 108

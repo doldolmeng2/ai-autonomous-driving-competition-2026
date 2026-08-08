@@ -91,7 +91,7 @@ LIGHT_GRAY_MIN_PIXELS = 10
 LIGHT_GRAY_MIN_RATIO = 0.08
 # 초록이 덩어리보다 오른쪽에 있어야 한다(중앙 점선/왼쪽 실선 배제).
 # 이웃 초록의 평균 x가 덩어리 평균 x보다 이 값 이상 커야 한다.
-GREEN_RIGHT_MARGIN_PX = -1000
+GREEN_RIGHT_MARGIN_PX = -1000 # 이거 안 쓴다는 의미로 -1000을 넣는다.
 # 1차선 경계 근거인 밝은 회색은 BEV 왼쪽 절반에서만 사용한다.
 # 오른쪽 바닥/구조물이 밝은 회색으로 분류되어 차선 변경이 조기 완료되는 것을 막는다.
 LIGHT_GRAY_MASK_MAX_X_RATIO = 0.5
@@ -101,7 +101,7 @@ LIGHT_GRAY_MASK_MAX_X_RATIO = 0.5
 ######################## 흰색 덩어리 필터 ########################
 MIN_COMPONENT_AREA = 50      # 너무 작은 덩어리 제외
 MIN_LINE_HEIGHT_PX = 25       # 세로로 어느 정도 길어야 실선
-MIN_LINE_ASPECT_RATIO = 0.0   # 세로/가로 비. 동글동글한 꽃 그림 배제
+MIN_LINE_ASPECT_RATIO = 0.0   # 세로/가로 비. 동글동글한 꽃 그림 배제 # 이것도 안 쓴다.
 # 꽃처럼 작고 뭉툭한 흰색 객체만 제외한다. 큰 객체에는 적용하지 않으므로
 # 회전 구간의 긴 대각선 차선이 축 정렬 bbox상 넓어 보여도 제거되지 않는다.
 SMALL_COMPACT_MAX_AREA = 1800
