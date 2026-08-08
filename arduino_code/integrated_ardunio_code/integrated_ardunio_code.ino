@@ -20,7 +20,7 @@
 
 constexpr uint8_t STEER_IN1 = 7;
 constexpr uint8_t STEER_IN2 = 6;
-constexpr uint8_t MOTOR1_IN1 = 13;
+constexpr uint8_t MOTOR1_IN1 = 5;
 constexpr uint8_t MOTOR1_IN2 = 12;
 constexpr uint8_t MOTOR2_IN1 = 11;
 constexpr uint8_t MOTOR2_IN2 = 10;

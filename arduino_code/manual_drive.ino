@@ -29,7 +29,7 @@
 #define STEER_IN1   7
 #define STEER_IN2   6
 
-#define MOTOR1_IN1  13
+#define MOTOR1_IN1  5
 #define MOTOR1_IN2  12
 
 #define MOTOR2_IN1  11

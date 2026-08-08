@@ -67,6 +67,35 @@ def test_pwm_command_is_published_without_serial_access():
     assert node.command_publisher.data == [180, 130]
 
 
+def make_drive_ramp_node():
+    node = object.__new__(DriveControlNode)
+    node.max_drive_pwm = 140
+    node.command_rate_hz = 20.0
+    node.drive_accel_duration_sec = 0.75
+    node.drive_decel_duration_sec = 0.75
+    node.current_drive_pwm = 0.0
+    return node
+
+
+def test_drive_acceleration_reaches_maximum_in_075_seconds():
+    node = make_drive_ramp_node()
+
+    outputs = [node.ramp_drive_output(140) for _ in range(15)]
+
+    assert outputs[-2] < 140
+    assert outputs[-1] == 140
+
+
+def test_drive_deceleration_reaches_zero_in_075_seconds():
+    node = make_drive_ramp_node()
+    node.current_drive_pwm = 140.0
+
+    outputs = [node.ramp_drive_output(0) for _ in range(15)]
+
+    assert outputs[-2] > 0
+    assert outputs[-1] == 0
+
+
 def make_closed_loop_node():
     node = object.__new__(DriveControlNode)
     node.steer_raw_left = 560

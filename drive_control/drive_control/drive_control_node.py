@@ -15,16 +15,10 @@ COMMAND_RATE = 20.0
 INPUT_TIMEOUT = 0.5
 STEERING_FEEDBACK_TIMEOUT = 0.5
 MAX_DRIVE_PWM = 230
-# [소프트 스타트] 구동 출력이 '초당' 최대 몇 PWM까지 올라갈 수 있는지(가속 속도).
-# 정지 상태에서 큰 값이 한 번에 나가 트랙이 밀리는 것을 막기 위한 값.
-# 크면 빨리 붙고(램프 약함), 작으면 천천히 붙는다(밀림 방지 강함).
-# 0→최대(230)까지 걸리는 시간 ≈ MAX_DRIVE_PWM / DRIVE_ACCEL_PWM_PER_SEC 초.
-DRIVE_ACCEL_PWM_PER_SEC = 300.0
-# [소프트 스타트] 감속/정지 시 '초당' 최대 몇 PWM까지 내릴 수 있는지(감속 속도).
-# 스로틀을 놓아 목표가 0이 되거나 목표가 작아질 때 급정지하지 않고 서서히 세운다.
-# 방향 전환(전진↔후진)도 이 속도로 0까지 내려간 뒤 반대로 가속한다.
-# 최대(230)→0까지 걸리는 시간 ≈ MAX_DRIVE_PWM / DRIVE_DECEL_PWM_PER_SEC 초.
-DRIVE_DECEL_PWM_PER_SEC = 400.0
+# [소프트 스타트] 0→최대 PWM 가속과 최대 PWM→0 감속에 걸리는 시간.
+# 실제 PWM 변화량은 max_drive_pwm과 명령 주기에 맞춰 자동 계산한다.
+DRIVE_ACCEL_DURATION_SEC = 0.75
+DRIVE_DECEL_DURATION_SEC = 0.75
 STEER_PWM = 150
 STEER_MAX_ANGLE_DEG = 45.0
 STEER_ANGLE_TOLERANCE_DEG = 1.0
@@ -95,9 +89,13 @@ class DriveControlNode(Node):
             STEERING_FEEDBACK_TIMEOUT,
         )
         self.declare_parameter('max_drive_pwm', MAX_DRIVE_PWM)
-        # [소프트 스타트] 가속/감속 속도 파라미터 선언.
-        self.declare_parameter('drive_accel_pwm_per_sec', DRIVE_ACCEL_PWM_PER_SEC)
-        self.declare_parameter('drive_decel_pwm_per_sec', DRIVE_DECEL_PWM_PER_SEC)
+        # [소프트 스타트] 0→최대 및 최대→0 램프 시간 파라미터.
+        self.declare_parameter(
+            'drive_accel_duration_sec', DRIVE_ACCEL_DURATION_SEC
+        )
+        self.declare_parameter(
+            'drive_decel_duration_sec', DRIVE_DECEL_DURATION_SEC
+        )
         self.declare_parameter('steer_pwm', STEER_PWM)
         self.declare_parameter('steer_max_angle_deg', STEER_MAX_ANGLE_DEG)
         self.declare_parameter(
@@ -149,12 +147,11 @@ class DriveControlNode(Node):
         self.max_drive_pwm = max(
             0, min(255, int(self.get_parameter('max_drive_pwm').value))
         )
-        # [소프트 스타트] 가속/감속 속도(PWM/초) 읽기. 음수가 들어와도 0으로 막아 안전 처리.
-        self.drive_accel_pwm_per_sec = max(
-            0.0, float(self.get_parameter('drive_accel_pwm_per_sec').value)
+        self.drive_accel_duration_sec = max(
+            0.05, float(self.get_parameter('drive_accel_duration_sec').value)
         )
-        self.drive_decel_pwm_per_sec = max(
-            0.0, float(self.get_parameter('drive_decel_pwm_per_sec').value)
+        self.drive_decel_duration_sec = max(
+            0.05, float(self.get_parameter('drive_decel_duration_sec').value)
         )
         self.steer_pwm = max(
             0, min(255, abs(int(self.get_parameter('steer_pwm').value)))
@@ -261,8 +258,8 @@ class DriveControlNode(Node):
             f'{self.steer_pid_kp:.2f}/{self.steer_pid_ki:.2f}/'
             f'{self.steer_pid_kd:.2f}; '
             f'drive ramp accel/decel='
-            f'{self.drive_accel_pwm_per_sec:.0f}/'
-            f'{self.drive_decel_pwm_per_sec:.0f} pwm/s'
+            f'{self.drive_accel_duration_sec:.2f}/'
+            f'{self.drive_decel_duration_sec:.2f} sec'
         )
 
     def motor_control_callback(self, msg):
@@ -340,11 +337,13 @@ class DriveControlNode(Node):
         # (컨트롤러 신호가 끊긴 '비상 정지'는 timer_callback에서 즉시 0으로 처리한다.)
         target = self.limit_drive_pwm(target)
         current = self.current_drive_pwm
-        accel_step = max(
-            1, int(round(self.drive_accel_pwm_per_sec / self.command_rate_hz))
+        # float 단위로 누적한 뒤 publish 시 정수로 변환하므로, max_drive_pwm이
+        # 주기 수로 나누어떨어지지 않아도 설정한 램프 시간을 정확히 맞출 수 있다.
+        accel_step = self.max_drive_pwm / (
+            self.drive_accel_duration_sec * self.command_rate_hz
         )
-        decel_step = max(
-            1, int(round(self.drive_decel_pwm_per_sec / self.command_rate_hz))
+        decel_step = self.max_drive_pwm / (
+            self.drive_decel_duration_sec * self.command_rate_hz
         )
 
         if current == 0:
@@ -374,6 +373,16 @@ class DriveControlNode(Node):
                 current = max(0, current - decel_step)
             else:
                 current = min(0, current + decel_step)
+
+        # 부동소수점 누적 오차로 마지막 값이 139.999...처럼 남지 않게 끝점을 고정한다.
+        if abs(current) < 1e-9:
+            current = 0.0
+        elif (
+            target != 0
+            and (current > 0) == (target > 0)
+            and abs(target - current) < 1e-9
+        ):
+            current = float(target)
 
         self.current_drive_pwm = current
         return current
