@@ -46,3 +46,9 @@ track_test_*
 cam_*
 
 bagfiles/
+
+# Local-only segmentation experiments
+extract_rosbag_rgb.py
+run_requested_5class_experiments.py
+run_segmentation_experiments.py
+skku_mission_rgb_100/
